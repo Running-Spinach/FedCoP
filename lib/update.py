@@ -87,9 +87,15 @@ class LocalUpdate(object):
 
         return trainloader
 
+    def _get_optimizer(self, model):
+        if self.args.optimizer == 'sgd':
+            return torch.optim.SGD(model.parameters(), lr=self.args.lr, momentum=0.5)
+        elif self.args.optimizer == 'adam':
+            return torch.optim.Adam(model.parameters(), lr=self.args.lr, weight_decay=1e-4)
+
     def update_weights(self, idx, model, global_round):
         """
-        标准本地模型权重更新（FedAvg方式）
+        标准本地模型权重更新（FedAvg方式 / FedBN方式）
 
         参数:
             idx: 客户端索引
@@ -99,18 +105,11 @@ class LocalUpdate(object):
         返回:
             model.state_dict(): 更新后的模型状态字典
             平均损失值
-            准确率
+            per-label 准确率
         """
         model.train()
         epoch_loss = []
-
-        # 设置优化器
-        if self.args.optimizer == 'sgd':
-            optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,
-                                        momentum=0.5)
-        elif self.args.optimizer == 'adam':
-            optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
-                                         weight_decay=1e-4)
+        optimizer = self._get_optimizer(model)
 
         for iter in range(self.args.train_ep):
             batch_loss = []
@@ -118,15 +117,16 @@ class LocalUpdate(object):
                 images, labels = images.to(self.device), labels_g.to(self.device)
 
                 model.zero_grad()
-                log_probs, protos = model(images)  # 前向传播
-                loss = self.criterion(log_probs, labels)  # 计算分类损失
+                output = model(images)
+                log_probs = output[0] if isinstance(output, tuple) else output
+                loss = self.criterion(log_probs, labels)
 
-                loss.backward()  # 反向传播
-                optimizer.step()  # 更新参数
+                loss.backward()
+                optimizer.step()
 
-                # 计算准确率
-                _, y_hat = log_probs.max(1)
-                acc_val = torch.eq(y_hat, labels.squeeze()).float().mean()
+                # 多标签 per-label 准确率
+                preds = (torch.sigmoid(log_probs) > 0.5).float()
+                acc_val = (preds == labels).float().mean()
 
                 if self.args.verbose and (batch_idx % 10 == 0):
                     print('| Global Round : {} | User: {} | Local Epoch : {} | [{}/{} ({:.0f}%)]\tLoss: {:.3f} | Acc: {:.3f}'.format(
@@ -139,6 +139,123 @@ class LocalUpdate(object):
             epoch_loss.append(sum(batch_loss) / len(batch_loss))
 
         return model.state_dict(), sum(epoch_loss) / len(epoch_loss), acc_val.item()
+
+    def update_weights_fedprox(self, idx, global_model_state, model, global_round):
+        """
+        FedProx 本地训练：L = L_CE + (mu/2) * ||w - w_global||^2
+
+        参数:
+            idx: 客户端索引
+            global_model_state: 全局模型 state_dict
+            model: 当前本地模型
+            global_round: 全局训练轮次
+
+        返回:
+            model.state_dict(), avg_loss, acc_val
+        """
+        model.train()
+        epoch_loss = []
+        mu = self.args.fedprox_mu
+        optimizer = self._get_optimizer(model)
+
+        for iter in range(self.args.train_ep):
+            batch_loss = []
+            for batch_idx, (images, labels_g) in enumerate(self.trainloader):
+                images, labels = images.to(self.device), labels_g.to(self.device)
+
+                model.zero_grad()
+                output = model(images)
+                log_probs = output[0] if isinstance(output, tuple) else output
+                loss_ce = self.criterion(log_probs, labels)
+
+                # FedProx 近端项：L2 距离（仅对可训练参数）
+                prox_term = 0.0
+                for name, param in model.named_parameters():
+                    if param.requires_grad and name in global_model_state:
+                        prox_term += torch.sum(
+                            (param - global_model_state[name].to(self.device)) ** 2)
+                loss = loss_ce + (mu / 2.0) * prox_term
+
+                loss.backward()
+                optimizer.step()
+
+                preds = (torch.sigmoid(log_probs) > 0.5).float()
+                acc_val = (preds == labels).float().mean()
+
+                if self.args.verbose and (batch_idx % 10 == 0):
+                    print('| Global Round : {} | User: {} | Local Epoch : {} | [{}/{} ({:.0f}%)]\tLoss: {:.3f} | Acc: {:.3f}'.format(
+                        global_round, idx, iter, batch_idx * len(images),
+                        len(self.trainloader.dataset),
+                        100. * batch_idx / len(self.trainloader),
+                        loss.item(),
+                        acc_val.item()))
+                batch_loss.append(loss.item())
+            epoch_loss.append(sum(batch_loss) / len(batch_loss))
+
+        return model.state_dict(), sum(epoch_loss) / len(epoch_loss), acc_val.item()
+
+    def update_weights_scaffold(self, idx, c_global, c_local, model, global_round):
+        """
+        SCAFFOLD 本地训练：梯度修正 g_corr = g - c_local + c_global
+
+        参数:
+            idx: 客户端索引
+            c_global: 全局 control variate (state_dict格式)
+            c_local: 本地 control variate (state_dict格式)
+            model: 当前本地模型
+            global_round: 全局训练轮次
+
+        返回:
+            model.state_dict(), avg_loss, acc_val, c_local_new, c_delta
+        """
+        model.train()
+        epoch_loss = []
+        lr = self.args.lr
+        optimizer = self._get_optimizer(model)
+        total_steps = 0
+
+        for iter in range(self.args.train_ep):
+            batch_loss = []
+            for batch_idx, (images, labels_g) in enumerate(self.trainloader):
+                images, labels = images.to(self.device), labels_g.to(self.device)
+
+                model.zero_grad()
+                output = model(images)
+                log_probs = output[0] if isinstance(output, tuple) else output
+                loss = self.criterion(log_probs, labels)
+                loss.backward()
+
+                # SCAFFOLD 梯度修正 + 参数更新
+                for name, param in model.named_parameters():
+                    if param.grad is not None and name in c_global and name in c_local:
+                        param.grad = (param.grad
+                                      - c_local[name].to(self.device)
+                                      + c_global[name].to(self.device))
+
+                optimizer.step()
+                total_steps += 1
+
+                preds = (torch.sigmoid(log_probs) > 0.5).float()
+                acc_val = (preds == labels).float().mean()
+
+                batch_loss.append(loss.item())
+            epoch_loss.append(sum(batch_loss) / len(batch_loss))
+
+        avg_loss = sum(epoch_loss) / len(epoch_loss)
+
+        # 更新本地 control variate
+        # c_i_new = c_i - c + (w_global_init - w_local_final) / (lr * K)
+        K = max(total_steps, 1)
+        c_local_new = {}
+        c_delta = {}
+        for name, param in model.named_parameters():
+            cl = c_local[name]
+            cg = c_global[name]
+            cl_new = cl - cg + (cg - param.detach().cpu()) / (lr * K)
+            c_local_new[name] = cl_new
+            c_delta[name] = cl_new - cl
+
+        return model.state_dict(), avg_loss, acc_val.item(), c_local_new, c_delta
 
     def update_weights_het(self, args, idx, global_protos, model, global_round=round):
         """
@@ -402,6 +519,48 @@ class LocalTest(object):
                 optimizer.step()
 
         return model
+
+
+def eval_clients_multilabel(args, local_model_list, test_dataset, user_groups_gt):
+    """
+    多标签联邦学习统一评估（FedAvg / FedProx / FedBN / SCAFFOLD 共用）
+
+    每个客户端用 sigmoid(logits) > 0.5 对本地测试集做 per-label 准确率
+
+    返回:
+        acc_list: 各客户端 per-label 准确率列表
+    """
+    device = args.device
+    acc_list = []
+
+    # IID 模式或无本地测试划分时，所有客户端共享同一个测试集
+    if user_groups_gt is None:
+        n_test = len(test_dataset)
+        user_groups_gt = [np.arange(n_test) for _ in range(args.num_users)]
+
+    for idx in range(args.num_users):
+        model = local_model_list[idx]
+        model.to(device)
+        model.eval()
+        testloader = DataLoader(DatasetSplit(test_dataset, user_groups_gt[idx]),
+                                batch_size=64, shuffle=False)
+
+        total_val, correct_val = 0.0, 0.0
+        with torch.no_grad():
+            for images, labels in testloader:
+                images, labels = images.to(device), labels.to(device)
+                output = model(images)
+                outputs = output[0] if isinstance(output, tuple) else output
+
+                preds = (torch.sigmoid(outputs) > 0.5).float()
+                correct_val += (preds == labels).float().sum().item()
+                total_val += labels.numel()
+
+        acc = correct_val / total_val
+        print('| User: {} | Test Acc (per-label): {:.4f}'.format(idx, acc))
+        acc_list.append(acc)
+
+    return acc_list
 
 
 def test_inference_new_het(args, local_model_list, test_dataset, global_protos=[]):

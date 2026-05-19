@@ -1,4 +1,8 @@
-# FedProto 联邦原型学习 —— 理论与实现详解 (ChestX-ray14 + ResNet-50)
+# DPP-FL 联邦原型学习 —— 理论与实现详解 (ChestX-ray14 + ResNet-50)
+
+> **DPP-FL** = Distributional Pathology Prototype Federated Learning
+>
+> 5 种对比基线 (FedAvg, FedProx, FedBN, SCAFFOLD, FedProto) + 提出的 DPP-FL 方法
 
 ---
 
@@ -419,7 +423,98 @@ federated_main.py
 
 ---
 
-## 十、关键参数速查
+## 十、对比算法详解
+
+本实现支持 5 种 FL 算法对比，通过 `--alg` 参数切换。
+
+### 10.1 FedAvg (McMahan et al., AISTATS 2017)
+
+最基础的联邦学习算法，仅做权重聚合：
+
+```
+每轮:
+  Server → Clients: 广播全局模型 w_t
+  Clients: 在本地数据上多轮 SGD 训练得到 w_t^k
+  Server: w_{t+1} = (1/K) * Σ w_t^k
+```
+
+- **优点**：简单、通信量可调
+- **缺点**：Non-IID 数据下性能退化严重（client drift）
+- **参数**：无额外参数
+
+### 10.2 FedProx (Li et al., MLSys 2020)
+
+在 FedAvg 基础上对本地目标函数添加近端项（proximal term），限制本地模型不要偏离全局模型太远：
+
+```
+L_local = L_BCE + (μ/2) * ||w - w_t||^2
+```
+
+- **优点**：部分缓解 Non-IID 导致的 client drift
+- **缺点**：μ 需要调参；μ 太大导致收敛慢，太小等于 FedAvg
+- **参数**：`--fedprox_mu` (默认 0.01)
+
+### 10.3 FedBN (Li et al., ICLR 2021)
+
+针对 **feature shift**（不同客户端数据分布不同导致的特征偏移）的解决方案：
+
+- 本地训练：正常 SGD（BN 层统计量本地更新）
+- 服务器聚合：**跳过所有 BN 层参数**（running_mean, running_var, weight, bias），仅聚合 conv 和 linear 层
+
+```
+aggregate: {conv, linear} ← 平均值
+keep local: {bn.running_mean, bn.running_var, bn.weight, bn.bias}
+```
+
+- **优点**：适合医疗影像场景（不同医院设备扫描参数不同导致 feature shift）
+- **缺点**：标签分布偏移（label skew）场景下效果有限
+- **参数**：无额外参数
+
+### 10.4 SCAFFOLD (Karimireddy et al., ICML 2020)
+
+使用 **control variates** 纠正 client drift：
+
+- 服务器维护全局 control variate `c`
+- 每个客户端维护本地 control variate `c_i`
+- 本地训练时修正梯度：`g_corrected = g - c_i + c`
+- 训练后更新：`c_i = c_i - c + (w_global - w_local) / (lr * K)`
+- 服务器更新：`c = c + (1/K) * Σ (c_i_new - c_i)`
+
+- **优点**：理论上可完全消除 client drift，收敛速度快
+- **缺点**：需要传输 control variate（与模型同大小），通信量翻倍；stateful（需保存每个客户端的 c_i）
+- **参数**：`--scaffold_lr` (全局 LR，默认等于 `--lr`)
+
+### 10.5 算法对比总结
+
+| 算法 | 类型 | 共享内容 | 通信量 | Non-IID 处理 |
+|------|------|----------|--------|-------------|
+| FedAvg | 权重共享基线 | 模型权重 (~23M) | 高 | — |
+| FedProx | 权重共享基线 | 模型权重 | 高 | 近端约束 |
+| FedBN | 权重共享基线 | 模型权重 (skip BN) | 高 | 本地 BN |
+| SCAFFOLD | 权重共享基线 | 权重 + control variates | 极高 (~2x) | 梯度修正 |
+| **FedProto** | **原型共享基线** | 点原型 (256dx14) | **低** | 原型正则化 |
+| **DPP-FL** | **原型共享 (提出)** | 高斯原型 `N(mu, sigma^2)` | **低** | 分布原型 + 贝叶斯融合 |
+
+### 10.6 DPP-FL 与 FedProto 的区别
+
+| 特性 | FedProto (基线) | DPP-FL (提出方法) |
+|------|----------------|-------------------|
+| 原型类型 | 点向量 `p in R^d` | 高斯分布 `N(mu, sigma^2)` |
+| 聚合方式 | 简单平均 | 精度加权贝叶斯融合 |
+| 不确定性 | 不建模 | Per-client variance |
+| 距离度量 | MSE | KL / Wasserstein / MSE |
+| 隐私保护 | 无 | 可选 (epsilon, delta)-DP |
+| 适用场景 | 一般 Non-IID | 高异质性 + 隐私敏感场景 |
+
+---
+
+## 十一、关键参数速查
+
+### 算法选择
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--alg` | fedproto | FL 算法: fedproto / fedavg / fedprox / fedbn / scaffold |
 
 ### 基础联邦参数
 
@@ -468,30 +563,52 @@ federated_main.py
 
 ---
 
-## 十一、运行示例
+## 十二、运行示例
 
 ```bash
-# 基础 FedProto (ChestX-ray14, ResNet-50, task heterogeneous, 5-way)
-python exps/federated_main.py \
+# === 基线算法 ===
+# FedProto (原始点原型)
+python exps/federated_main.py --alg fedproto \
     --ways 5 --shots 100 --num_users 20 --rounds 200 --ld 1.0
 
-# 分布原型模式 (KL 散度)
-python exps/federated_main.py \
+# FedAvg
+python exps/federated_main.py --alg fedavg \
+    --ways 5 --shots 100 --num_users 20 --rounds 200 --frac 1.0
+
+# FedProx
+python exps/federated_main.py --alg fedprox \
+    --fedprox_mu 0.01 --ways 5 --num_users 20 --rounds 200
+
+# FedBN
+python exps/federated_main.py --alg fedbn \
+    --ways 5 --shots 100 --num_users 20 --rounds 200 --frac 1.0
+
+# SCAFFOLD
+python exps/federated_main.py --alg scaffold \
+    --ways 5 --shots 100 --num_users 20 --rounds 200
+
+# === 提出方法: DPP-FL ===
+# 点原型模式 (与 FedProto 对照)
+python exps/federated_main.py --alg dppfl \
+    --ways 5 --shots 100 --num_users 20 --rounds 200 --ld 1.0
+
+# 分布原型 (KL 散度)
+python exps/federated_main.py --alg dppfl \
     --use_distributional --dist_type kl --ways 5 --rounds 200
 
-# 差分隐私 + 分布原型
-python exps/federated_main.py \
+# 分布原型 + 差分隐私
+python exps/federated_main.py --alg dppfl \
     --use_distributional --dist_type wasserstein \
     --use_dp --dp_epsilon 8.0 --dp_clip 1.0 --rounds 30
 
-# 调整原型维度
-python exps/federated_main.py \
-    --proto_dim 128 --rounds 100
+# 快速测试 (MNIST)
+python exps/federated_main.py --alg fedavg \
+    --model cnn --num_classes 10 --iid 1 --rounds 50 --num_users 10
 ```
 
 ---
 
-## 十二、数学符号汇总
+## 十三、数学符号汇总
 
 | 符号 | 含义 |
 |------|------|
@@ -512,7 +629,7 @@ python exps/federated_main.py \
 
 ---
 
-## 十二、实现细节与注意事项
+## 十四、实现细节与注意事项
 
 ### 12.1 原型格式统一
 

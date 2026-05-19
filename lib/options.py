@@ -30,7 +30,9 @@ def args_parser():
 
     # 模型参数
     parser.add_argument('--model', type=str, default='resnet50', help='模型名称: resnet50 / cnn')
-    parser.add_argument('--alg', type=str, default='fedproto', help="算法名称")
+    parser.add_argument('--alg', type=str, default='dppfl',
+                        choices=['fedproto', 'fedavg', 'fedprox', 'fedbn', 'scaffold', 'dppfl'],
+                        help="FL算法: fedproto(点原型基线), fedavg, fedprox, fedbn, scaffold, dppfl(分布原型+DP)")
     parser.add_argument('--num_channels', type=int, default=3, help="图像通道数（ChestX-ray14灰度图转3通道）")
     parser.add_argument('--norm', type=str, default='batch_norm',
                         help="归一化方式: batch_norm, layer_norm, 或 None")
@@ -83,6 +85,12 @@ def args_parser():
                         help='目标delta值 (epsilon, delta)-DP')
     parser.add_argument('--dp_clip', type=float, default=1.0,
                         help='原型的L2范数裁剪界限')
+
+    # FedProx / SCAFFOLD 专属参数
+    parser.add_argument('--fedprox_mu', type=float, default=0.01,
+                        help='FedProx 近端项系数 mu')
+    parser.add_argument('--scaffold_lr', type=float, default=None,
+                        help='SCAFFOLD 全局学习率（默认等于 --lr）')
 
     args = parser.parse_args()
     return args

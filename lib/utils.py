@@ -108,14 +108,34 @@ def get_dataset(args, n_list, k_list):
 
 
 def average_weights(w):
-    w_avg = copy.deepcopy(w)
-    for key in w[0].keys():
-        if key[0:4] != '....':
-            for i in range(1, len(w)):
-                w_avg[0][key] += w[i][key]
-            w_avg[0][key] = torch.div(w_avg[0][key], len(w))
-            for i in range(1, len(w)):
-                w_avg[i][key] = w_avg[0][key]
+    """
+    标准 FedAvg 权重聚合：对所有参数取均值（等权平均）
+    """
+    w_avg = copy.deepcopy(w[0])
+    for key in w_avg.keys():
+        for i in range(1, len(w)):
+            w_avg[key] += w[i][key]
+        w_avg[key] = torch.div(w_avg[key], len(w))
+    return w_avg
+
+
+def average_weights_fedbn(w):
+    """
+    FedBN 权重聚合：跳过 BatchNorm 层参数，仅平均 conv/linear 层
+
+    BN 层参数包括：running_mean, running_var, weight, bias
+    （这些保留各客户端本地值，不做聚合）
+
+    返回:
+        w_avg: 聚合后的 state_dict（BN 参数 = 第一个客户端的值作为占位）
+    """
+    w_avg = copy.deepcopy(w[0])
+    for key in w_avg.keys():
+        if 'bn' in key or 'running_mean' in key or 'running_var' in key:
+            continue  # 跳过 BN 参数，保留客户端本地值
+        for i in range(1, len(w)):
+            w_avg[key] += w[i][key]
+        w_avg[key] = torch.div(w_avg[key], len(w))
     return w_avg
 
 
@@ -171,6 +191,7 @@ def proto_aggregation(local_protos_list, use_distributional=False):
 
 def exp_details(args):
     print('\nExperimental details:')
+    print(f'    Algorithm : {args.alg}')
     print(f'    Model     : {args.model}')
     print(f'    Optimizer : {args.optimizer}')
     print(f'    Learning  : {args.lr}')
@@ -185,20 +206,29 @@ def exp_details(args):
     print(f'    Local Batch size   : {args.local_bs}')
     print(f'    Local Epochs       : {args.train_ep}\n')
 
-    if getattr(args, 'use_distributional', False):
-        print('    Distributional proto: Enabled')
-        print(f'    Distribution type   : {args.dist_type}')
+    if args.alg == 'fedprox':
+        print(f'    FedProx mu         : {args.fedprox_mu}')
+    if args.alg == 'scaffold':
+        scaffold_lr = args.scaffold_lr or args.lr
+        print(f'    SCAFFOLD global lr : {scaffold_lr}')
+
+    if args.alg == 'fedproto':
+        print('    Prototype mode     : Point (baseline)')
+    if args.alg == 'dppfl':
+        if getattr(args, 'use_distributional', False):
+            print('    Prototype mode     : Distributional')
+            print(f'    Distribution type   : {args.dist_type}')
+        else:
+            print('    Prototype mode     : Distributional (disabled, using point)')
         if getattr(args, 'proto_dim', None):
             print(f'    Proto dim           : {args.proto_dim}')
-    else:
-        print('    Distributional proto: Disabled')
 
-    if getattr(args, 'use_dp', False):
-        print('    Differential Privacy: Enabled')
-        print(f'    Target epsilon      : {args.dp_epsilon}')
-        print(f'    Target delta        : {args.dp_delta}')
-        print(f'    Clip norm           : {args.dp_clip}')
-    else:
-        print('    Differential Privacy: Disabled')
+        if getattr(args, 'use_dp', False):
+            print('    Differential Privacy: Enabled')
+            print(f'    Target epsilon      : {args.dp_epsilon}')
+            print(f'    Target delta        : {args.dp_delta}')
+            print(f'    Clip norm           : {args.dp_clip}')
+        else:
+            print('    Differential Privacy: Disabled')
     print()
     return
