@@ -47,8 +47,10 @@ def FedProto_taskheter(args, train_dataset, test_dataset, user_groups, user_grou
     # global_protos: 所有客户端共享的全局原型字典 {label: proto}
     # 第 0 轮时为空列表，客户端在本地训练时会跳过原型正则化项 (loss2 = 0)
     global_protos = []
-    idxs_users = np.arange(args.num_users)          # 所有客户端都参与训练（不使用部分采样）
     train_loss, train_accuracy = [], []
+
+    # 每轮参与客户端采样数量
+    m = max(1, int(args.frac * args.num_users))
 
     # ── 差分隐私组件初始化 ──────────────────────────────────────────
     # 核心原理：对每个客户端上传的 (mu, logvar) 做 L2 范数裁剪 + 高斯噪声，
@@ -77,6 +79,9 @@ def FedProto_taskheter(args, train_dataset, test_dataset, user_groups, user_grou
     for round in tqdm(range(args.rounds)):
         local_weights, local_losses, local_protos = [], [], {}
         print(f'\n | Global Training Round : {round + 1} |\n')
+
+        # 每轮随机采样参与客户端
+        idxs_users = np.random.choice(args.num_users, m, replace=False)
 
         # ── 阶段一：本地训练（遍历每个客户端） ─────────────────────
         # 每个客户端独立执行：

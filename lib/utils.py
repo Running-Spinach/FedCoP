@@ -162,12 +162,9 @@ def proto_aggregation(local_protos_list, use_distributional=False):
                 proto = 0 * proto_list[0].data
                 for p in proto_list:
                     proto += p.data
-                agg_protos_label[label] = [proto / len(proto_list)]
+                agg_protos_label[label] = proto / len(proto_list)
         else:
-            if use_distributional:
-                agg_protos_label[label] = proto_list[0]
-            else:
-                agg_protos_label[label] = [proto_list[0].data]
+            agg_protos_label[label] = proto_list[0]
 
     return agg_protos_label
 

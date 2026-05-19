@@ -68,32 +68,38 @@ FedProto (AAAI 2022) 的核心创新：**不共享模型权重，而是共享每
 ### 3.1 全局训练流程
 
 ```
-输入: K 个客户端，每客户端有本地模型 f_k，全局轮数 T
+输入: K 个客户端，每客户端有本地模型 f_k，全局轮数 T, 采样率 frac
 输出: 训练好的本地模型列表，全局原型集合 G
 
 初始化: 全局原型 G = {}  (空)
 
 For round t = 1 to T:
-    For each client k = 1 to K (并行):
+    # 客户端采样（由 --frac 控制，默认 0.04 = 每轮采样 4% 客户端）
+    选中 m = max(1, int(frac * K)) 个客户端参与本轮
+
+    For each selected client k:
         1. 本地训练
-           - 使用本地数据 + 全局原型 G 训练模型 f_k
-           - 损失函数: L = L_CE + λ * L_proto
+           - 用深拷贝的上一轮模型 + 全局原型 G 在本地数据上训练
+           - 损失函数: L = L_BCE + λ * L_proto
            - 提取本地原型: P_k = { (label, proto_vec), ... }
 
-        2. 客户端内原型聚合
-           - 同一客户端内同标签的多个原型取平均
+        2. 客户端内原型聚合 (agg_func)
+           - 同一客户端内同标签的多个原型取平均 / 方差合并
            - 得到聚合后的本地原型 P_k'
 
-    (可选) 差分隐私: P_k' = P_k' + GaussianNoise
+    (可选) 差分隐私: P_k' = DPMechProto.clip_and_noise(P_k')
 
-    3. 服务器聚合
-       - 收集所有客户端的 P_k'
-       - 按标签合并，跨客户端取平均
+    3. 服务器聚合 (proto_aggregation)
+       - 收集所有参与客户端的 P_k'
+       - 按标签合并，跨客户端取平均 / 贝叶斯融合
        - 更新全局原型 G
 
+    4. 将本轮训练好的权重写回 local_model_list
+       （保留各客户端个性化模型，不做 FedAvg 式权重聚合）
+
 最终测试:
-    - 不使用全局原型: 各客户端直接用本地模型 softmax 分类
-    - 使用全局原型: 基于最近原型距离分类 (1-NN with prototypes)
+    - 不使用全局原型: sigmoid(logits) > 0.5 多标签分类
+    - 使用全局原型: 负原型距离 → sigmoid → 二值预测
 ```
 
 ### 3.2 损失函数详解
@@ -159,13 +165,13 @@ ChestX-ray14 是多标签数据集（每张 X 光片可包含多种疾病）。F
   σ²_avg = mean(σ²_i) + Var(mus)   // E[Var] + Var[E]
   ```
 
-**层次二：跨客户端聚合** (`proto_aggregation` in [utils.py](lib/utils.py#L270))
+**层次二：跨客户端聚合** (`proto_aggregation` in [utils.py](lib/utils.py#L146))
 
 服务器收集所有客户端的本地原型后，按标签聚合：
 
 - 点原型: 直接对所有客户端的该类别原型取平均
   ```
-  global_proto_label = (1/K) * Σ proto_k
+  global_proto_label = (1/K) * Σ proto_k    # 单一张量，不包装为列表
   ```
 
 - 分布原型: **贝叶斯融合** (精度加权平均)
@@ -175,6 +181,8 @@ ChestX-ray14 是多标签数据集（每张 X 光片可包含多种疾病）。F
   σ²_global = 1 / Σ prec_k
   ```
   这意味着方差小的客户端（更确定的估计）权重更大。
+
+两种模式返回格式统一：点原型为单一张量，分布原型为 (mu, logvar) 元组。
 
 ### 3.5 推理/测试方式
 
@@ -389,20 +397,24 @@ federated_main.py
   └─ FedProto_taskheter()      → 主训练循环
       │
       For each round:
-        For each client:
+        ├─ 采样 m = frac * K 个客户端 (idxs_users)
+        For each selected client:
           ├─ LocalUpdate.update_weights_het()
-          │   ├─ model.forward()          → (logits, protos) 或 (logits, mu, logvar)
+          │   ├─ model(copy.deepcopy(local_model)) → (logits, protos) 或 (logits, mu, logvar)
           │   ├─ loss = BCE + λ * proto_loss   ← 多标签损失
           │   │   └─ distributional_proto_loss()  → KL / Wasserstein / MSE
-          │   └─ agg_func()              → 客户端内多标签原型聚合
+          │   └─ 客户端内 agg_func()              → 多标签原型取平均/合并方差
           │
           ├─ DPMechProto.clip_and_noise() → (可选) DP 扰动
-          └─ proto_aggregation()          → 跨客户端原型聚合
-              └─ bayesian_fusion_single_label() → (可选) 贝叶斯融合
+          │
+        ├─ proto_aggregation()          → 跨客户端原型聚合
+        │   └─ bayesian_fusion_single_label() → (可选) 分布原型贝叶斯融合
+        │
+        └─ 将本轮训练权重写回 local_model_list
 
       test_inference_new_het_lt()
-        ├─ 不使用全局原型: sigmoid(logits) > 0.5
-        └─ 使用全局原型: 负原型距离 → sigmoid → 二值预测
+        ├─ 不使用全局原型: sigmoid(logits) > 0.5  (per-label)
+        └─ 使用全局原型: 负原型距离 → sigmoid → 二值预测 (per-label)
 ```
 
 ---
@@ -414,6 +426,7 @@ federated_main.py
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--num_users` | 20 | 客户端数量 |
+| `--frac` | 0.04 | 每轮参与训练的客户端比例 |
 | `--rounds` | 100 | 全局通信轮数 |
 | `--train_ep` | 1 | 每轮本地训练 epoch 数 |
 | `--local_bs` | 4 | 本地批次大小 |
@@ -498,6 +511,49 @@ python exps/federated_main.py \
 | y^(i) | 样本 i 的 14 维多标签二值向量 |
 
 ---
+
+## 十二、实现细节与注意事项
+
+### 12.1 原型格式统一
+
+全局原型字典 `global_protos` 的 value 格式在两种模式下保持一致：
+
+- **点原型**: 单一张量 `tensor(shape=[proto_dim])`，不再包装为列表
+- **分布原型**: 二元组 `(mu: tensor, logvar: tensor)`，各自 shape=[proto_dim]
+
+调用方不需要根据模式做不同的索引处理（已修复原有的 `[0]` 包装不对称问题）。
+
+### 12.2 客户端采样
+
+`--frac` 参数控制每轮参与训练的客户端比例。每轮随机采样 `m = max(1, int(frac * K))` 个客户端：
+
+- 降低通信开销
+- 增加随机性，有助于泛化
+- 未参与轮的客户端保留上一轮模型，在后续轮次可被选中继续训练
+
+### 12.3 多标签原型损失计算
+
+原型正则化损失 `L_proto` 的计算方式（以点原型为例）：
+
+```
+对 batch 中每张图 i:
+  对每个正标签 j (labels[i, j] == 1):
+    loss2 += MSE(proto_i, global_protos[j])
+loss2 = loss2 / count  # 除以所有正标签总数
+```
+
+即平均到每个正标签上，而非每张图。这意味着有多个疾病的 X 光片对原型损失的贡献更大。
+
+### 12.4 "No Finding" 负样本处理
+
+在 Non-IID 划分时，"No Finding"（标签全为 0）的样本不按疾病标签排序，而是均匀分配给所有客户端（每个客户端至少 10 张），作为负样本参与训练。这确保了每个客户端都能学到"正常"的表示。
+
+### 12.5 分布原型的数值稳定性
+
+- `logvar` 被 clamp 到 [-10, 10] 范围（`ProbabilisticProtoHead`）
+- `var = exp(logvar)`，对应方差范围约 [4.5e-5, 2.2e4]
+- `agg_func` 中 `logvar_avg = log(avg_var + 1e-8)` 防止 log(0)
+- 推理时 `g_var + 1e-8` 防止除零
 
 ## 参考文献
 

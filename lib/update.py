@@ -214,7 +214,7 @@ class LocalUpdate(object):
                             proto_i = protos[i_lbl]
                             for lbl_idx in range(args.num_classes):
                                 if labels[i_lbl, lbl_idx] > 0 and lbl_idx in global_protos:
-                                    loss2 += loss_mse(proto_i, global_protos[lbl_idx][0])
+                                    loss2 += loss_mse(proto_i, global_protos[lbl_idx])
                                     count += 1
                         loss2 = loss2 / max(count, 1)
 
@@ -446,7 +446,7 @@ def test_inference_new_het(args, local_model_list, test_dataset, global_protos=[
                         g_var = torch.exp(g_logvar) + 1e-8
                         dist = 0.5 * (((ensem_proto[i, :] - g_mu) ** 2) / g_var).sum()
                     else:
-                        dist = loss_mse(ensem_proto[i, :], global_protos[j][0])
+                        dist = loss_mse(ensem_proto[i, :], global_protos[j])
                     proto_logits[i, j] = -dist
 
         preds = (torch.sigmoid(proto_logits) > 0.5).float()
@@ -520,25 +520,26 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
                             g_var = torch.exp(g_logvar) + 1e-8
                             dist = 0.5 * (((proto_feats[i, :] - g_mu) ** 2) / g_var).sum()
                         else:
-                            dist = loss_mse(proto_feats[i, :], global_protos[j][0])
+                            dist = loss_mse(proto_feats[i, :], global_protos[j])
                         proto_logits[i, j] = -dist  # 负距离 → 越近值越大
 
             preds = (torch.sigmoid(proto_logits) > 0.5).float()
             correct_val += (preds == labels).float().sum().item()
             total_val += labels.numel()
 
-            # 记录平均原型损失
+            # 记录平均原型损失（对所有全局类别取平均）
             if len(global_protos) > 0:
-                keys_in_global = list(global_protos.keys())
-                if use_dist:
-                    g_mu, g_logvar = global_protos[keys_in_global[0]]
-                    g_var = torch.exp(g_logvar) + 1e-8
-                    loss2 = 0.5 * (((mu - g_mu.unsqueeze(0)) ** 2) / (g_var.unsqueeze(0) + 1e-8)).mean()
-                else:
-                    loss2 = loss_mse(protos, global_protos[keys_in_global[0]][0])
-
-            if isinstance(loss2, torch.Tensor):
-                loss2 = loss2.cpu().detach().numpy() if args.device == 'cuda' else loss2.detach().numpy()
+                loss2 = 0.0
+                count = 0
+                for lbl_idx in global_protos:
+                    if use_dist:
+                        g_mu, g_logvar = global_protos[lbl_idx]
+                        g_var = torch.exp(g_logvar) + 1e-8
+                        loss2 += 0.5 * (((mu - g_mu.unsqueeze(0)) ** 2) / (g_var.unsqueeze(0) + 1e-8)).mean().item()
+                    else:
+                        loss2 += loss_mse(protos, global_protos[lbl_idx]).item()
+                    count += 1
+                loss2 = loss2 / max(count, 1)
 
         acc = correct_val / total_val
         print('| User: {} | Test Acc with protos (per-label): {:.4f}'.format(idx, acc))
@@ -546,19 +547,6 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
         loss_list.append(loss2)
 
     return acc_list_l, acc_list_g, loss_list
-
-
-def agg_func(protos, agg_protos_label):
-    """
-    聚合函数，将多个原型按标签堆叠后取均值
-
-    参数:
-        protos: 原型数据
-        agg_protos_label: 按标签聚合的原型列表
-    """
-    for i in range(len(agg_protos_label)):
-        if len(agg_protos_label[i]) != 0:
-            protos[i] = torch.stack(agg_protos_label[i]).mean(dim=0)
 
 
 def get_proto_vec(args, local_model_list, dataset, user_groups_gt):
@@ -627,11 +615,10 @@ def get_proto_vec_lt(args, local_model_list, dataset, user_groups_gt):
     y = []
     d = []
 
-    agg_protos_label = {}
-
     for i in range(args.num_users):
         model = local_model_list[i]
         model.eval()
+        agg_protos_label = {}
         for batch_idx, (images, label_g) in enumerate(DataLoader(DatasetSplit(dataset, user_groups_gt[i]), batch_size=64, shuffle=False)):
             images_l, labels_l = images.to(args.device), label_g.to(args.device)
             output = model(images_l)
@@ -641,14 +628,14 @@ def get_proto_vec_lt(args, local_model_list, dataset, user_groups_gt):
                 _, protos = output
 
             for k in range(len(labels_l)):
-                if label_g[k].item() in agg_protos_label:
-                    agg_protos_label[label_g[k].item()].append(protos[k, :])
+                lbl = label_g[k].item() if isinstance(label_g[k], torch.Tensor) else label_g[k]
+                if lbl in agg_protos_label:
+                    agg_protos_label[lbl].append(protos[k, :])
                 else:
-                    agg_protos_label[label_g[k].item()] = [protos[k, :]]
+                    agg_protos_label[lbl] = [protos[k, :]]
 
-    for i in range(args.num_users):
-        for label in agg_protos_label[i].keys():
-            for proto in agg_protos_label[i][label]:
+        for label, proto_list in agg_protos_label.items():
+            for proto in proto_list:
                 if args.device == 'cuda':
                     tmp = proto.cpu().detach().numpy()
                 else:
