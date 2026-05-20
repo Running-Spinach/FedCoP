@@ -92,5 +92,15 @@ def args_parser():
     parser.add_argument('--scaffold_lr', type=float, default=None,
                         help='SCAFFOLD 全局学习率（默认等于 --lr）')
 
+    # DPP-FL 专属参数（提出方法）
+    parser.add_argument('--pretrained', action='store_true', default=True,
+                        help='DPP-FL: 使用 ImageNet 预训练 ResNet-50 (默认开启)')
+    parser.add_argument('--proto_momentum', type=float, default=0.9,
+                        help='DPP-FL: 全局原型 EMA 动量系数 (0=无动量)')
+    parser.add_argument('--ld_warmup', type=int, default=50,
+                        help='DPP-FL: 原型损失权重 warmup 轮数')
+    parser.add_argument('--temperature', type=float, default=1.0,
+                        help='DPP-FL: 原型推理温度系数 (越小越尖锐)')
+
     args = parser.parse_args()
     return args

@@ -1,6 +1,9 @@
 # ResNet-50 骨干网络，适配 ChestX-ray14 多标签分类与原型提取
 # 架构：ResNet-50 → fc1(2048→proto_dim) → [ProtoHead] → fc2(proto_dim→14)
 # 原型来自 fc1 输出（点原型）或 ProtoHead 输出（分布原型）
+#
+# FedProto 基线: ResNet50 (from scratch, Kaiming init)
+# DPP-FL 提出方法: DPPFLResNet (ImageNet pretrained backbone)
 
 import sys
 from pathlib import Path
@@ -11,6 +14,7 @@ if str(lib_dir) not in sys.path:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.models as tv_models
 from dist_proto import ProbabilisticProtoHead
 
 
@@ -136,6 +140,71 @@ class ResNet50(nn.Module):
         proto_features = F.relu(self.fc1(x))  # (B, proto_dim)
 
         # 分类
+        logits = self.fc2(proto_features)     # (B, num_classes)
+
+        if self.use_distributional and self.proto_head is not None:
+            mu, logvar = self.proto_head(proto_features)
+            return logits, mu, logvar
+        else:
+            return logits, proto_features
+
+
+class DPPFLResNet(nn.Module):
+    """DPP-FL 专用模型：ImageNet 预训练 ResNet-50 + 原型头 + 分类头
+
+    与 FedProto 基线的关键区别：
+      - 使用 torchvision 预训练权重（ImageNet），大幅提升有限医学数据下的特征质量
+      - 仅微调 layer3/layer4 + 原型/分类头（stem + layer1/layer2 冻结）
+      - 支持分布原型 ProbabilisticProtoHead
+
+    输出格式（取决于 use_distributional）：
+      - 点原型: (logits, protos)
+      - 分布原型: (logits, mu, logvar)
+    """
+
+    def __init__(self, args):
+        super().__init__()
+        self.num_classes = args.num_classes
+        self.proto_dim = getattr(args, 'proto_dim', None) or 256
+        self.use_distributional = getattr(args, 'use_distributional', False)
+
+        # ── 加载 ImageNet 预训练 ResNet-50 ──
+        pretrained = getattr(args, 'pretrained', True)
+        weights = tv_models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
+        backbone = tv_models.resnet50(weights=weights)
+
+        # 分离 stem + layers + avgpool
+        self.stem = nn.Sequential(
+            backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool)
+        self.layer1 = backbone.layer1
+        self.layer2 = backbone.layer2
+        self.layer3 = backbone.layer3
+        self.layer4 = backbone.layer4
+        self.avgpool = backbone.avgpool
+        self.fc_backbone = backbone.fc  # 保留引用，实际不用
+
+        # ── 原型提取层 ──
+        self.fc1 = nn.Linear(2048, self.proto_dim)
+
+        # ── 分布原型头（可选）──
+        if self.use_distributional:
+            self.proto_head = ProbabilisticProtoHead(self.proto_dim, proto_dim=self.proto_dim)
+        else:
+            self.proto_head = None
+
+        # ── 分类头 ──
+        self.fc2 = nn.Linear(self.proto_dim, self.num_classes)
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)          # (B, 2048)
+
+        proto_features = F.relu(self.fc1(x))  # (B, proto_dim)
         logits = self.fc2(proto_features)     # (B, num_classes)
 
         if self.use_distributional and self.proto_head is not None:

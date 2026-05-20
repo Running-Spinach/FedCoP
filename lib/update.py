@@ -563,7 +563,7 @@ def eval_clients_multilabel(args, local_model_list, test_dataset, user_groups_gt
     return acc_list
 
 
-def test_inference_new_het(args, local_model_list, test_dataset, global_protos=[]):
+def test_inference_new_het(args, local_model_list, test_dataset, global_protos=[], temperature=None):
     """全局测试推理：基于原型最近邻距离的多标签分类
 
     返回:
@@ -571,6 +571,8 @@ def test_inference_new_het(args, local_model_list, test_dataset, global_protos=[
     """
     loss_mse = nn.MSELoss()
     use_dist = getattr(args, 'use_distributional', False)
+    if temperature is None:
+        temperature = getattr(args, 'temperature', 1.0)
     device = args.device
     testloader = DataLoader(test_dataset, batch_size=64, shuffle=False)
 
@@ -606,7 +608,7 @@ def test_inference_new_het(args, local_model_list, test_dataset, global_protos=[
                         dist = 0.5 * (((ensem_proto[i, :] - g_mu) ** 2) / g_var).sum()
                     else:
                         dist = loss_mse(ensem_proto[i, :], global_protos[j])
-                    proto_logits[i, j] = -dist
+                    proto_logits[i, j] = -dist / temperature
 
         preds = (torch.sigmoid(proto_logits) > 0.5).float()
         correct_val += (preds == labels).float().sum().item()
@@ -615,8 +617,14 @@ def test_inference_new_het(args, local_model_list, test_dataset, global_protos=[
     return correct_val / total_val
 
 
-def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list, user_groups_gt, global_protos=[]):
+def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list, user_groups_gt, global_protos=[], temperature=None):
     """多标签联邦学习测试：分别评估模型自身分类和原型最近邻分类的效果
+
+    参数:
+        temperature: 原型推理温度系数。None 时自动从 args 读取，默认 1.0
+            - T > 1: 软化概率（更平滑）
+            - T < 1: 锐化概率（更确信）
+            - 仅 FedProto / DPP-FL 有效
 
     返回:
         acc_list_l: 各客户端用自身模型（sigmoid阈值）的 per-label 准确率
@@ -625,6 +633,8 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
     """
     loss_mse = nn.MSELoss()
     use_dist = getattr(args, 'use_distributional', False)
+    if temperature is None:
+        temperature = getattr(args, 'temperature', 1.0)
     device = args.device
 
     acc_list_g = []
@@ -668,7 +678,7 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
             else:
                 outputs, protos = output
 
-            # 计算到每个全局原型的距离 → 负距离作为 logit → sigmoid → 二值预测
+            # 计算到每个全局原型的距离 → 负距离/T 作为 logit → sigmoid → 二值预测
             proto_feats = mu if (use_dist and len(output) == 3) else protos
             proto_logits = torch.zeros(images.shape[0], args.num_classes, device=device)
             for i in range(images.shape[0]):
@@ -680,7 +690,7 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
                             dist = 0.5 * (((proto_feats[i, :] - g_mu) ** 2) / g_var).sum()
                         else:
                             dist = loss_mse(proto_feats[i, :], global_protos[j])
-                        proto_logits[i, j] = -dist  # 负距离 → 越近值越大
+                        proto_logits[i, j] = -dist / temperature  # 温度缩放
 
             preds = (torch.sigmoid(proto_logits) > 0.5).float()
             correct_val += (preds == labels).float().sum().item()
