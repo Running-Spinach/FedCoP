@@ -153,6 +153,59 @@ class DPMechProto:
         return num_participating / max(total_clients, 1)
 
 
+class DPMechWeight:
+    """
+    针对模型权重上传的差分隐私机制 (DP-FedAvg 风格)
+
+    对每个客户端的权重 delta (w_local - w_global) 进行 L2 裁剪 + 高斯噪声处理
+    """
+
+    def __init__(self, clip_norm=1.0, noise_multiplier=1.0, use_dp=False):
+        self.clip_norm = clip_norm
+        self.noise_multiplier = noise_multiplier
+        self.use_dp = use_dp
+
+    def clip_and_noise(self, local_state_dict, global_state_dict):
+        """
+        对权重 delta 进行 L2 裁剪并添加高斯噪声
+
+        参数:
+            local_state_dict: 本地模型 state_dict
+            global_state_dict: 全局模型 state_dict (作为 delta 参考)
+
+        返回:
+            perturbed: 扰动后的 state_dict
+        """
+        if not self.use_dp:
+            return local_state_dict
+
+        sigma = self.clip_norm * self.noise_multiplier
+        perturbed = {}
+
+        for key in local_state_dict:
+            if key not in global_state_dict:
+                perturbed[key] = local_state_dict[key]
+                continue
+            delta = local_state_dict[key] - global_state_dict[key].to(local_state_dict[key].device)
+            delta_flat = delta.view(-1)
+            norm = torch.norm(delta_flat, p=2)
+            scale = min(1.0, self.clip_norm / (norm + 1e-8))
+            delta_clipped = delta_flat * scale
+
+            noise = torch.normal(mean=0.0, std=sigma, size=delta_clipped.shape,
+                                device=delta.device)
+            delta_perturbed = delta_clipped + noise
+
+            perturbed[key] = (global_state_dict[key].to(delta.device)
+                              + delta_perturbed.view_as(delta))
+
+        return perturbed
+
+    @staticmethod
+    def sample_rate(num_participating, total_clients):
+        return num_participating / max(total_clients, 1)
+
+
 def compute_noise_multiplier_from_epsilon(target_eps, sample_rate, delta,
                                           orders=None, max_iters=100):
     """

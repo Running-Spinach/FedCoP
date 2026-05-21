@@ -32,7 +32,7 @@ def args_parser():
     parser.add_argument('--model', type=str, default='resnet50', help='模型名称: resnet50 / cnn')
     parser.add_argument('--alg', type=str, default='dppfl',
                         choices=['fedproto', 'fedavg', 'fedprox', 'fedbn', 'scaffold', 'dppfl'],
-                        help="FL算法: fedproto(点原型基线), fedavg, fedprox, fedbn, scaffold, dppfl(分布原型+DP)")
+                        help="FL算法: fedproto(点原型基线), fedavg, fedprox, fedbn, scaffold, dppfl(分布原型+DP, 提出方法)")
     parser.add_argument('--num_channels', type=int, default=3, help="图像通道数（ChestX-ray14灰度图转3通道）")
     parser.add_argument('--norm', type=str, default='batch_norm',
                         help="归一化方式: batch_norm, layer_norm, 或 None")
@@ -78,7 +78,7 @@ def args_parser():
 
     # 差分隐私参数
     parser.add_argument('--use_dp', action='store_true',
-                        help='是否对原型上传启用差分隐私保护')
+                        help='是否启用差分隐私保护（权重/原型上传，所有算法共用）')
     parser.add_argument('--dp_epsilon', type=float, default=8.0,
                         help='目标epsilon值 (epsilon, delta)-DP')
     parser.add_argument('--dp_delta', type=float, default=1e-5,

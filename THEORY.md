@@ -1,8 +1,8 @@
-# DPP-FL 联邦原型学习 —— 理论与实现详解 (ChestX-ray14 + ResNet-50)
+# DPP-FL 联邦原型学习 —— 理论与实现详解 (ChestX-ray14 + 预训练 ResNet-50)
 
-> **DPP-FL** = Distributional Pathology Prototype Federated Learning
+> **DPP-FL** = Distributional Dual-Stream Federated Pathology Representation Learning
 >
-> 5 种对比基线 (FedAvg, FedProx, FedBN, SCAFFOLD, FedProto) + 提出的 DPP-FL 方法
+> 6 种算法 (FedAvg, FedProx, FedBN, SCAFFOLD, FedProto, DPP-FL) 全部使用 ImageNet 预训练骨干 + 差分隐私进行公平对比
 
 ---
 
@@ -264,25 +264,20 @@ clamp 防止方差爆炸或退化。
 
 ### 5.1 动机
 
-原型向量虽然不直接暴露原始数据，但仍可能泄露统计信息。差分隐私提供形式化的隐私保证。
+所有 6 种算法均支持差分隐私保护，通过 `--use_dp` 统一开启。原型向量或模型权重在上传前进行 L2 裁剪 + 高斯噪声扰动。
 
-### 5.2 机制: 高斯噪声扰动
+### 5.2 机制
 
-[mechanisms.py](lib/dp/mechanisms.py) 实现了针对原型上传的 DP 保护：
+**原型方式 (FedProto / DPP-FL)**: 使用 `DPMechProto`，对 `(μ || logvar)` 拼接向量进行 L2 裁剪 + 高斯噪声。
 
-1. **L2 裁剪**: 将 `(μ || logvar)` 拼接向量的 L2 范数裁剪到 `clip_norm` 以内
+**权重方式 (FedAvg / FedProx / FedBN / SCAFFOLD)**: 使用 `DPMechWeight`，对权重 delta `w_local - w_global` 进行 L2 裁剪 + 高斯噪声。
 
-   ```
-   v_clipped = v * min(1, C / ||v||₂)
-   ```
+```
+v_clipped = v * min(1, C / ||v||₂)
+v_noisy = v_clipped + N(0, σ² * C² * I)
+```
 
-2. **高斯噪声**: 添加零均值高斯噪声
-
-   ```
-   v_noisy = v_clipped + N(0, σ² * C² * I)
-   ```
-
-   其中 `σ` 由二分搜索根据目标 `(ε, δ)` 确定。
+其中 `σ` 由二分搜索根据目标 `(ε, δ)` 确定。
 
 ### 5.3 隐私预算追踪 (Moments Accountant)
 
@@ -298,11 +293,10 @@ clamp 防止方差爆炸或退化。
 
 | 参数 | 含义 | 默认值 |
 |------|------|--------|
+| `--use_dp` | 启用差分隐私（所有算法） | False |
 | `--dp_epsilon` | 目标 ε | 8.0 |
 | `--dp_delta` | 目标 δ | 1e-5 |
 | `--dp_clip` | L2 裁剪范数 | 1.0 |
-
-注意：ε=8 是相对宽松的隐私预算，适合研究场景。生产环境通常需要 ε < 1。
 
 ---
 
@@ -320,15 +314,17 @@ clamp 防止方差爆炸或退化。
 
 ## 七、模型架构
 
-### ResNet-50 Backbone
+### 预训练 ResNet-50 Backbone (所有算法共用)
+
+所有算法统一使用 `DPPFLResNet`：ImageNet 预训练 ResNet-50 + 原型头 + 分类头。
 
 ```
 Input (3, 224, 224)  ← 灰度X光片经 Grayscale(3) 转3通道
-  → conv1 (7×7, stride=2) → BN → ReLU → MaxPool(3×3, stride=2)
-  → layer1: 3× Bottleneck(64→256)   输出 (256, 56, 56)
-  → layer2: 4× Bottleneck(256→512)  输出 (512, 28, 28)
-  → layer3: 6× Bottleneck(512→1024) 输出 (1024, 14, 14)
-  → layer4: 3× Bottleneck(1024→2048) 输出 (2048, 7, 7)
+  → stem: conv1 (7×7) → BN → ReLU → MaxPool  ← ImageNet 预训练权重
+  → layer1: 3× Bottleneck(64→256)    ← 冻结
+  → layer2: 4× Bottleneck(256→512)   ← 冻结
+  → layer3: 6× Bottleneck(512→1024)  ← 微调
+  → layer4: 3× Bottleneck(1024→2048) ← 微调
   → AdaptiveAvgPool2d(1) → Flatten → (2048-dim)
   → fc1 (2048 → proto_dim=256) → ReLU  ← 原型特征
   → [ProbabilisticProtoHead]  ← (可选) 分布原型
@@ -486,24 +482,30 @@ keep local: {bn.running_mean, bn.running_var, bn.weight, bn.bias}
 
 ### 10.5 算法对比总结
 
-| 算法 | 类型 | 共享内容 | 通信量 | Non-IID 处理 |
-|------|------|----------|--------|-------------|
-| FedAvg | 权重共享基线 | 模型权重 (~23M) | 高 | — |
-| FedProx | 权重共享基线 | 模型权重 | 高 | 近端约束 |
-| FedBN | 权重共享基线 | 模型权重 (skip BN) | 高 | 本地 BN |
-| SCAFFOLD | 权重共享基线 | 权重 + control variates | 极高 (~2x) | 梯度修正 |
-| **FedProto** | **原型共享基线** | 点原型 (256dx14) | **低** | 原型正则化 |
-| **DPP-FL** | **原型共享 (提出)** | 高斯原型 `N(mu, sigma^2)` | **低** | 分布原型 + 贝叶斯融合 |
+所有算法均使用 ImageNet 预训练 ResNet-50 + 可选 DP。
+
+| 算法 | 类型 | 共享内容 | 通信量 | Non-IID 处理 | DP 方式 |
+|------|------|----------|--------|-------------|---------|
+| FedAvg | 权重共享基线 | 模型权重 (~23M) | 高 | — | 权重 delta |
+| FedProx | 权重共享基线 | 模型权重 | 高 | 近端约束 | 权重 delta |
+| FedBN | 权重共享基线 | 模型权重 (skip BN) | 高 | 本地 BN | 权重 delta |
+| SCAFFOLD | 权重共享基线 | 权重 + control variates | 极高 (~2x) | 梯度修正 | 权重 delta |
+| **FedProto** | **原型共享基线** | 点原型 (256dx14) | **低** | 原型正则化 | 原型向量 |
+| **DPP-FL** | **原型共享 (提出)** | 高斯原型 `N(mu, sigma^2)` | **低** | 分布原型 + 贝叶斯融合 | 原型向量 |
 
 ### 10.6 DPP-FL 与 FedProto 的区别
 
 | 特性 | FedProto (基线) | DPP-FL (提出方法) |
 |------|----------------|-------------------|
+| 骨干网络 | 预训练 ResNet-50 | 预训练 ResNet-50 |
 | 原型类型 | 点向量 `p in R^d` | 高斯分布 `N(mu, sigma^2)` |
 | 聚合方式 | 简单平均 | 精度加权贝叶斯融合 |
 | 不确定性 | 不建模 | Per-client variance |
+| 原型动量 | 无 | EMA `G_t = β*G_{t-1} + (1-β)*G_new` |
+| λ 调度 | 常数 | Warmup: `λ * min(1, round/W)` |
+| 推理温度 | 1.0 | 可配置 `-dist / T` |
 | 距离度量 | MSE | KL / Wasserstein / MSE |
-| 隐私保护 | 无 | 可选 (epsilon, delta)-DP |
+| 隐私保护 | 可选 (ε, δ)-DP | 可选 (ε, δ)-DP |
 | 适用场景 | 一般 Non-IID | 高异质性 + 隐私敏感场景 |
 
 ---
@@ -514,7 +516,7 @@ keep local: {bn.running_mean, bn.running_var, bn.weight, bn.bias}
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--alg` | fedproto | FL 算法: fedproto / fedavg / fedprox / fedbn / scaffold |
+| `--alg` | dppfl | FL 算法: fedproto / fedavg / fedprox / fedbn / scaffold / dppfl |
 
 ### 基础联邦参数
 
@@ -552,54 +554,77 @@ keep local: {bn.running_mean, bn.running_var, bn.weight, bn.bias}
 | `--dist_type` | kl | 分布距离类型: kl/wasserstein/mse |
 | `--proto_dim` | 256 | 原型向量维度 (ResNet-50 默认 256) |
 
-### 差分隐私参数
+### 差分隐私参数 (所有算法共用)
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--use_dp` | False | 启用差分隐私 |
+| `--use_dp` | False | 启用差分隐私（权重/原型上传） |
 | `--dp_epsilon` | 8.0 | 目标 ε |
 | `--dp_delta` | 1e-5 | 目标 δ |
 | `--dp_clip` | 1.0 | L2 裁剪范数 |
+
+### DPP-FL 专属参数 (提出方法)
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--proto_momentum` | 0.9 | 全局原型 EMA 动量系数 |
+| `--ld_warmup` | 50 | 原型损失权重 warmup 轮数 |
+| `--temperature` | 1.0 | 原型推理温度系数 |
+| `--pretrained` | True | ImageNet 预训练 (所有算法默认开启) |
 
 ---
 
 ## 十二、运行示例
 
 ```bash
-# === 基线算法 ===
+# === 所有算法均使用预训练 ResNet-50，通过 --use_dp 开启 DP ===
+
 # FedProto (原始点原型)
 python exps/federated_main.py --alg fedproto \
     --ways 5 --shots 100 --num_users 20 --rounds 200 --ld 1.0
 
-# FedAvg
+# FedProto + DP
+python exps/federated_main.py --alg fedproto \
+    --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
+    --ways 5 --num_users 20 --rounds 30
+
+# FedAvg + DP
 python exps/federated_main.py --alg fedavg \
-    --ways 5 --shots 100 --num_users 20 --rounds 200 --frac 1.0
+    --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
+    --ways 5 --num_users 20 --rounds 30 --frac 1.0
 
-# FedProx
+# FedProx + DP
 python exps/federated_main.py --alg fedprox \
-    --fedprox_mu 0.01 --ways 5 --num_users 20 --rounds 200
+    --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
+    --fedprox_mu 0.01 --ways 5 --num_users 20 --rounds 30
 
-# FedBN
+# FedBN + DP
 python exps/federated_main.py --alg fedbn \
-    --ways 5 --shots 100 --num_users 20 --rounds 200 --frac 1.0
+    --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
+    --ways 5 --num_users 20 --rounds 30 --frac 1.0
 
-# SCAFFOLD
+# SCAFFOLD + DP
 python exps/federated_main.py --alg scaffold \
-    --ways 5 --shots 100 --num_users 20 --rounds 200
+    --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
+    --ways 5 --shots 100 --num_users 20 --rounds 30
 
 # === 提出方法: DPP-FL ===
-# 点原型模式 (与 FedProto 对照)
+# 点原型
 python exps/federated_main.py --alg dppfl \
     --ways 5 --shots 100 --num_users 20 --rounds 200 --ld 1.0
 
-# 分布原型 (KL 散度)
+# 分布原型 (KL 散度) + DP
 python exps/federated_main.py --alg dppfl \
-    --use_distributional --dist_type kl --ways 5 --rounds 200
+    --use_distributional --dist_type kl \
+    --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
+    --ways 5 --rounds 30
 
-# 分布原型 + 差分隐私
+# 完整 DPP-FL (所有增强)
 python exps/federated_main.py --alg dppfl \
-    --use_distributional --dist_type wasserstein \
-    --use_dp --dp_epsilon 8.0 --dp_clip 1.0 --rounds 30
+    --use_distributional --dist_type kl \
+    --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
+    --proto_momentum 0.9 --temperature 0.5 --ld_warmup 50 \
+    --ways 5 --num_users 20 --rounds 100
 
 # 快速测试 (MNIST)
 python exps/federated_main.py --alg fedavg \

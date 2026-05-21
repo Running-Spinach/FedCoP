@@ -223,17 +223,18 @@ def exp_details(args):
         if getattr(args, 'proto_dim', None):
             print(f'    Proto dim           : {args.proto_dim}')
 
-        print(f'    Pretrained backbone : {getattr(args, "pretrained", True)}')
         print(f'    Proto momentum      : {getattr(args, "proto_momentum", 0.9)}')
         print(f'    LD warmup rounds    : {getattr(args, "ld_warmup", 50)}')
         print(f'    Temperature         : {getattr(args, "temperature", 1.0)}')
 
-        if getattr(args, 'use_dp', False):
-            print('    Differential Privacy: Enabled')
-            print(f'    Target epsilon      : {args.dp_epsilon}')
-            print(f'    Target delta        : {args.dp_delta}')
-            print(f'    Clip norm           : {args.dp_clip}')
-        else:
-            print('    Differential Privacy: Disabled')
+    print(f'    Pretrained backbone : {getattr(args, "pretrained", True)}')
+
+    if getattr(args, 'use_dp', False):
+        print('    Differential Privacy: Enabled (all algorithms)')
+        print(f'    Target epsilon      : {args.dp_epsilon}')
+        print(f'    Target delta        : {args.dp_delta}')
+        print(f'    Clip norm           : {args.dp_clip}')
+    else:
+        print('    Differential Privacy: Disabled')
     print()
     return

@@ -1,30 +1,33 @@
-# DPP-FL: Distributional Pathology Prototype Federated Learning
+# DPP-FL: Distributional Dual-Stream Federated Pathology Representation Learning
 
 Privacy-Preserving Medical Image Classification via Federated Prototype Learning with Distributional Prototypes and Differential Privacy.
 
-Based on [FedProto (AAAI 2022)](https://arxiv.org/abs/2105.00243), this project provides **5 FL baselines** + the proposed **DPP-FL** method:
+All algorithms use **ImageNet pretrained ResNet-50** backbone + **Differential Privacy** for fair comparison. Based on [FedProto (AAAI 2022)](https://arxiv.org/abs/2105.00243), this project provides **5 FL baselines** + the proposed **DPP-FL** method:
 
 ### Baselines (comparison algorithms)
 
 | Algorithm | Shared Info | Key Mechanism | Paper |
 |-----------|------------|---------------|-------|
-| **FedAvg** | Model weights | Simple weight averaging | AISTATS 2017 |
-| **FedProx** | Model weights | Proximal term `mu/2 * ||w - w_t||^2` | MLSys 2020 |
-| **FedBN** | Model weights (no BN) | Local BN stats, global conv/linear | ICLR 2021 |
-| **SCAFFOLD** | Model weights + control variates | Gradient correction `g - c_i + c` | ICML 2020 |
-| **FedProto** | Class prototypes (point) | Prototype regularization + nearest-neighbor | AAAI 2022 |
+| **FedAvg** | Model weights | Simple weight averaging + DP | AISTATS 2017 |
+| **FedProx** | Model weights | Proximal term `mu/2 * ||w - w_t||^2` + DP | MLSys 2020 |
+| **FedBN** | Model weights (no BN) | Local BN stats, global conv/linear + DP | ICLR 2021 |
+| **SCAFFOLD** | Model weights + control variates | Gradient correction `g - c_i + c` + DP | ICML 2020 |
+| **FedProto** | Class prototypes (point) | Prototype regularization + nearest-neighbor + DP | AAAI 2022 |
 
 ### Proposed Method: DPP-FL
 
 | Algorithm | Shared Info | Key Innovation |
 |-----------|------------|----------------|
-| **DPP-FL** | Gaussian prototypes `N(mu, sigma^2)` | Distributional prototypes + Bayesian fusion + optional DP |
+| **DPP-FL** | Gaussian prototypes `N(mu, sigma^2)` | Distributional prototypes + Bayesian fusion + Proto EMA + Temperature scaling |
 
-Key features of DPP-FL:
+Key features of DPP-FL (all algorithms share pretrained backbone + DP for fairness):
 
 - **Distributional Prototypes** — each class prototype is modeled as a Gaussian distribution `N(mu, sigma^2)`, capturing per-client uncertainty
 - **Bayesian Fusion** — precision-weighted aggregation: clients with lower variance get higher weight
-- **Differential Privacy** — Gaussian noise perturbation + Moments Accountant for formal (epsilon, delta)-DP guarantees
+- **Prototype EMA Momentum** — exponential moving average of global prototypes for stability
+- **Adaptive Lambda Warmup** — gradual increase of prototype loss weight to avoid early bias
+- **Temperature-Scaled Inference** — sharpened prototype distances for better class separation
+- **Differential Privacy** — Gaussian noise perturbation + Moments Accountant for formal (epsilon, delta)-DP guarantees (applied to weights for weight-sharing methods, prototypes for prototype-sharing methods)
 - **Multi-label Classification** — adapted for Chest X-ray diagnosis (14 disease labels per image)
 - **Task Heterogeneity** — each client sees only a subset of disease classes (Non-IID label skew)
 
@@ -85,7 +88,7 @@ DPP-FL/
 
 ## Running
 
-Select the algorithm via `--alg` (default: `dppfl`):
+Select the algorithm via `--alg` (default: `dppfl`). All algorithms use pretrained ResNet-50 backbone. Add `--use_dp` to enable differential privacy.
 
 ### Baselines
 ```bash
@@ -93,9 +96,19 @@ Select the algorithm via `--alg` (default: `dppfl`):
 python exps/federated_main.py --alg fedproto \
     --ways 5 --shots 100 --num_users 20 --rounds 200 --ld 1.0
 
+# FedProto + DP
+python exps/federated_main.py --alg fedproto \
+    --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
+    --ways 5 --num_users 20 --rounds 30
+
 # FedAvg
 python exps/federated_main.py --alg fedavg \
     --ways 5 --shots 100 --num_users 20 --rounds 200 --frac 1.0
+
+# FedAvg + DP
+python exps/federated_main.py --alg fedavg \
+    --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
+    --ways 5 --num_users 20 --rounds 30
 
 # FedProx
 python exps/federated_main.py --alg fedprox \
@@ -112,7 +125,7 @@ python exps/federated_main.py --alg scaffold \
 
 ### Proposed: DPP-FL
 ```bash
-# 分布原型 (点原型默认)
+# 点原型模式
 python exps/federated_main.py --alg dppfl \
     --ways 5 --shots 100 --num_users 20 --rounds 200 --ld 1.0
 
@@ -121,11 +134,18 @@ python exps/federated_main.py --alg dppfl \
     --use_distributional --dist_type kl \
     --ways 5 --rounds 200 --ld 1.0
 
-# 分布原型 + 差分隐私
+# 分布原型 + DP
 python exps/federated_main.py --alg dppfl \
     --use_distributional --dist_type wasserstein \
     --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
     --rounds 30
+
+# 完整 DPP-FL (分布原型 + DP + 温度缩放 + 动量)
+python exps/federated_main.py --alg dppfl \
+    --use_distributional --dist_type kl \
+    --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
+    --proto_momentum 0.9 --temperature 0.5 --ld_warmup 50 \
+    --ways 5 --num_users 20 --rounds 100
 ```
 
 ### Quick test (MNIST, IID)
@@ -184,41 +204,51 @@ python exps/federated_main.py --alg fedavg \
 | `--use_distributional` | False | Enable Gaussian prototypes `N(mu, sigma^2)` |
 | `--dist_type` | kl | Distance type: kl / wasserstein / mse |
 
-### Differential Privacy (DPP-FL only)
+### Differential Privacy (all algorithms)
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--use_dp` | False | Enable DP on uploaded prototypes |
+| `--use_dp` | False | Enable DP on uploaded weights/prototypes |
 | `--dp_epsilon` | 8.0 | Target epsilon |
 | `--dp_delta` | 1e-5 | Target delta |
-| `--dp_clip` | 1.0 | L2 clipping norm for prototypes |
+| `--dp_clip` | 1.0 | L2 clipping norm |
 
 ### Algorithm-Specific
 | Parameter | Default | Applies To | Description |
 |-----------|---------|------------|-------------|
 | `--fedprox_mu` | 0.01 | FedProx | Proximal term coefficient |
 | `--scaffold_lr` | None | SCAFFOLD | Global LR (defaults to `--lr`) |
+| `--pretrained` | True | All | Use ImageNet pretrained ResNet-50 |
+| `--proto_momentum` | 0.9 | DPP-FL | Global prototype EMA momentum |
+| `--ld_warmup` | 50 | DPP-FL | Proto loss weight warmup rounds |
+| `--temperature` | 1.0 | DPP-FL | Proto inference temperature |
 
 ## Key Features
 
 ### 5 Baselines + DPP-FL Proposed Method
 
+All algorithms use **ImageNet pretrained ResNet-50** backbone + optional **DP** (weight-level for weight-sharing, prototype-level for prototype-sharing).
+
 | Algorithm | Type | Server Aggregation | Local Objective |
 |-----------|------|-------------------|-----------------|
-| **FedAvg** | Weight-sharing | Weight averaging | `L_BCE` |
-| **FedProx** | Weight-sharing | Weight averaging | `L_BCE + (mu/2) * ||w - w_global||^2` |
-| **FedBN** | Weight-sharing | Weight avg (skip BN) | `L_BCE` |
-| **SCAFFOLD** | Weight-sharing | Weight avg + control variate | `L_BCE` with grad correction |
-| **FedProto** | Prototype-sharing (baseline) | Prototype averaging | `L_BCE + lambda * MSE(proto, global_proto)` |
-| **DPP-FL** | Prototype-sharing (proposed) | Bayesian fusion + optional DP | `L_BCE + lambda * KL/Wasserstein(N_loc, N_global)` |
+| **FedAvg** | Weight-sharing | Weight averaging (+ DP) | `L_BCE` |
+| **FedProx** | Weight-sharing | Weight averaging (+ DP) | `L_BCE + (mu/2) * ||w - w_global||^2` |
+| **FedBN** | Weight-sharing | Weight avg (skip BN) (+ DP) | `L_BCE` |
+| **SCAFFOLD** | Weight-sharing | Weight avg + control variate (+ DP) | `L_BCE` with grad correction |
+| **FedProto** | Prototype-sharing (baseline) | Prototype averaging (+ DP on protos) | `L_BCE + lambda * MSE(proto, global_proto)` |
+| **DPP-FL** | Prototype-sharing (proposed) | Bayesian fusion (+ DP on protos) | `L_BCE + lambda * KL/Wasserstein(N_loc, N_global)` |
 
 ### DPP-FL vs FedProto
 
 | Feature | FedProto (baseline) | DPP-FL (proposed) |
 |---------|-------------------|-------------------|
+| Backbone | Pretrained ResNet-50 | Pretrained ResNet-50 |
 | Prototype type | Point vector | Gaussian `N(mu, sigma^2)` |
 | Aggregation | Simple averaging | Precision-weighted Bayesian fusion |
 | Uncertainty | Not modeled | Per-client variance |
-| Privacy | None | Optional (epsilon, delta)-DP |
+| Privacy | Optional (epsilon, delta)-DP | Optional (epsilon, delta)-DP |
+| Proto Momentum | None | EMA `G_t = beta*G_{t-1} + (1-beta)*G_new` |
+| Lambda Schedule | Constant | Warmup: `ld * min(1, round/warmup)` |
+| Inference Temp | 1.0 (none) | Configurable: `-dist / T` |
 | Distance | MSE | KL / Wasserstein / MSE |
 
 ### Prototype Learning
