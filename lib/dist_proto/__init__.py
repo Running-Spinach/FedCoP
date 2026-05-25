@@ -7,3 +7,4 @@ from .losses import (
     distributional_proto_loss,
 )
 from .aggregation import bayesian_fusion, bayesian_fusion_single_label
+from .disentangle import DisentangledProtoHead, disentanglement_loss

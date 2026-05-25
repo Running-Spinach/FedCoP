@@ -131,18 +131,29 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
       3. 自适应原型损失权重 warmup
       4. 温度缩放原型推理
       5. 分布原型 + 贝叶斯融合 + 可选差分隐私
+      6. 原型解耦 (语义-风格分离) + 独立性约束 (HSIC)
+         - 仅共享语义原型，风格原型保留本地
+         - 语义原型更纯净 → 跨客户端聚合噪声更小
+         - 同等 DP budget 下信噪比更高 → 隐私-效用 tradeoff 更优
     """
     use_dist = getattr(args, 'use_distributional', False)
     use_dp = getattr(args, 'use_dp', False)
+    use_dis = getattr(args, 'use_disentangle', False)
+    dis_lambda = getattr(args, 'dis_lambda', 0.05)
     proto_momentum = getattr(args, 'proto_momentum', 0.9)
     ld_warmup = getattr(args, 'ld_warmup', 50)
     temperature = getattr(args, 'temperature', 1.0)
 
+    suffix = '_dis' if use_dis else ''
     summary_writer = SummaryWriter(
-        f'../tensorboard/chestxray_{args.alg}_'
+        f'../tensorboard/chestxray_{args.alg}{suffix}_'
         f'{args.ways}w{args.shots}s{args.stdev}e_'
         f'{args.num_users}u_{args.rounds}r'
     )
+
+    if use_dis:
+        sem_dim = int(getattr(args, 'proto_dim', 256) * getattr(args, 'sem_ratio', 0.75))
+        print(f'Prototype Disentanglement ENABLED: sem_dim={sem_dim}, dis_lambda={dis_lambda}')
 
     global_protos = []
     global_protos_ema = {}                                    # EMA 积累的原型
@@ -166,6 +177,7 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
 
         idxs_users = np.random.choice(args.num_users, m, replace=False)
         proto_loss = 0
+        dis_loss_sum = 0
 
         # ── 自适应原型损失权重 warmup ──
         ld = args.ld * min(1.0, (round + 1) / max(ld_warmup, 1))
@@ -173,7 +185,6 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
         for idx in idxs_users:
             local_model = LocalUpdate(args=args, dataset=train_dataset,
                                       idxs=user_groups[idx])
-            # 临时覆盖 ld 用于 warmup
             w, loss, acc, protos = local_model.update_weights_het(
                 args, idx, global_protos,
                 model=copy.deepcopy(local_model_list[idx]),
@@ -187,10 +198,13 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
             summary_writer.add_scalar(f'Train/Loss/user{idx+1}', loss['total'], round)
             summary_writer.add_scalar(f'Train/Loss1/user{idx+1}', loss['1'], round)
             summary_writer.add_scalar(f'Train/Loss2/user{idx+1}', loss['2'], round)
+            summary_writer.add_scalar(f'Train/Loss3-Dis/user{idx+1}', loss['3'], round)
             summary_writer.add_scalar(f'Train/Acc/user{idx+1}', acc, round)
             proto_loss += loss['2']
+            dis_loss_sum += loss['3']
 
         if use_dp:
+            # 解耦模式下仅对语义原型加噪 → 语义维度更小 → DP 信噪比更高
             for idx in idxs_users:
                 local_protos[idx] = dp_mech.clip_and_noise(local_protos[idx])
 
@@ -199,7 +213,7 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
             local_model.load_state_dict(local_weights[i_w], strict=True)
             local_model_list[idx] = local_model
 
-        # ── 全局原型聚合 ──
+        # ── 全局原型聚合（解耦模式下仅聚合语义原型）──
         new_global_protos = proto_aggregation(local_protos, use_distributional=use_dist)
 
         # ── 原型 EMA 动量 ──
@@ -227,9 +241,11 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
             print(f'| Round {round+1} | DP epsilon: {accountant.get_epsilon():.4f}')
 
         summary_writer.add_scalar('Train/ld', ld, round)
+        if use_dis:
+            summary_writer.add_scalar('Train/Loss3-Dis/mean', dis_loss_sum / len(idxs_users), round)
         train_loss.append(sum(local_losses) / len(local_losses))
 
-    # ── 最终评估（带温度缩放）──
+    # ── 最终评估（带温度缩放 + 解耦感知）──
     acc_list_l, acc_list_g, loss_list = test_inference_new_het_lt(
         args, local_model_list, test_dataset, classes_list, user_groups_lt,
         global_protos, temperature=temperature)

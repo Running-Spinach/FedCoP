@@ -1,8 +1,10 @@
 # DPP-FL 联邦原型学习 —— 理论与实现详解 (ChestX-ray14 + 预训练 ResNet-50)
 
-> **DPP-FL** = Distributional Dual-Stream Federated Pathology Representation Learning
+> **DPP-FL** = Distributional Pathology Prototype Federated Learning
 >
 > 6 种算法 (FedAvg, FedProx, FedBN, SCAFFOLD, FedProto, DPP-FL) 全部使用 ImageNet 预训练骨干 + 差分隐私进行公平对比
+>
+> DPP-FL 在 FedProto 基础上新增：分布原型 + 贝叶斯融合 + EMA 动量 + Lambda 预热 + 温度缩放 + **原型解耦 (语义-风格分离)**
 
 ---
 
@@ -260,13 +262,122 @@ clamp 防止方差爆炸或退化。
 
 ---
 
-## 五、差分隐私 (DP) 扩展
+## 五、原型解耦扩展 (DPP-FL 专属)
 
 ### 5.1 动机
 
+在跨医院联邦学习中，不同客户端的 X 光片存在**域偏移 (Domain Shift)**：
+
+| 风格来源 | 说明 |
+|----------|------|
+| 设备差异 | 不同厂商的 X 光机成像对比度、亮度不同 |
+| 采集参数 | kVp、mAs、曝光时间等设置差异 |
+| 后处理 | 各医院 PACS 系统的窗宽窗位、锐化参数 |
+| 患者群体 | 不同地区人群体型、年龄分布差异 |
+
+这些风格信息会混入原型向量中，产生两个问题：
+
+1. **聚合噪声**：风格差异被当作语义差异跨客户端聚合，污染全局原型
+2. **DP 效率低**：高斯噪声加在"语义+风格"混合信号上，有效信噪比被稀释
+
+**核心洞察**：如果将原型分解为 **语义 (semantic)** 和 **风格 (style)** 两个独立子空间，仅共享语义部分，则：
+- 语义原型更纯净 → 跨客户端聚合方差更小
+- 同等 DP budget 下有效信号占比更高 → 隐私-效用 tradeoff 更优
+
+### 5.2 实现方式
+
+```
+fc1 输出 (256-dim)
+  ├── z_sem  (前 192 维) ──→ [ProtoHead] ──→ 共享到服务器
+  └── z_style (后 64 维)  ──→ [ProtoHead] ──→ 保留本地
+
+分类: logits = fc2(concat(z_sem, z_style))  ← 分类头同时使用两部分
+```
+
+**语义部分**：编码疾病判别特征（病灶形状、纹理、位置），跨客户端一致。
+**风格部分**：编码医院成像特性（对比度、噪声模式），辅助本地分类但不共享。
+
+### 5.3 独立性约束 (HSIC)
+
+为强制两部分编码独立信息，在本地训练中加入 Hilbert-Schmidt Independence Criterion (HSIC) 损失。
+
+使用线性核 HSIC 的简化形式 —— 交叉协方差矩阵的 Frobenius 范数：
+
+```
+L_dis = ||Cov(z_sem, z_style)||_F^2
+
+其中 Cov(z_sem, z_style)_ij = (1/(n-1)) * Σ_k (z_sem_k_i - z_sem̄_i) * (z_style_k_j - z_stylē_j)
+```
+
+该损失惩罚语义和风格之间的所有线性相关性：
+
+- **L_dis 大**：语义维度与风格维度高度相关 → 有风格泄露到语义中
+- **L_dis 小**：两部分统计独立 → 成功解耦
+
+辅助方差正则项防止解耦过程中特征坍缩到零。
+
+### 5.4 训练流程（解耦版本）
+
+```
+本地训练:
+  L_total = L_BCE + λ * L_proto_sem + λ_dis * L_dis
+
+  L_BCE      ← 分类损失（使用完整 z_sem + z_style）
+  L_proto_sem ← 仅对语义部分计算与全局原型的距离
+  L_dis      ← 交叉协方差独立性约束（本地计算，不上传）
+
+服务器聚合（仅语义原型）:
+  P_k^sem = agg_func(z_sem)                   ← 客户端内语义原型聚合
+  G_new = proto_aggregation({P_k^sem})        ← 跨客户端仅聚合语义
+
+  z_style 永远不出客户端 ← 风格信息 100% 本地化
+```
+
+### 5.5 与 DP 的协同效应
+
+解耦 + DP 的组合有一个独特的理论优势：
+
+| | 不解耦 | 解耦 |
+|---|---|---|
+| 上传向量维度 | proto_dim (256) | sem_dim (192, 75%) |
+| 向量内容 | 语义 + 风格混合 | 纯语义 |
+| 风格噪声 | 跨客户端随机波动 → 等效噪声 | 零（不上传） |
+| DP 噪声影响 | 同时损害语义和风格 | 仅损害语义 |
+| 有效信噪比 | 低 | 高 |
+
+在低 ε 场景下，解耦 vs 不解耦的性能差距应该更大——这是论文的核心卖点。
+
+### 5.6 关键参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--use_disentangle` | False | 启用原型解耦（仅 DPP-FL） |
+| `--sem_ratio` | 0.75 | 语义维度占比 (0.75 → 192/256) |
+| `--dis_lambda` | 0.05 | 独立性损失权重 |
+
+### 5.7 理论性质
+
+**命题 1 (聚合方差上界)**：Non-IID 程度为 η 时，解耦后的语义原型聚合方差上界降低为原始的 `sem_ratio²` 倍。
+
+直观：风格噪声（约占 25% 维度）不再参与聚合，方差来源减少。
+
+**命题 2 (DP 信噪比)**：在相同 ε 预算下，解耦后语义原型的有效信噪比为：
+
+```
+SNR_dis / SNR_orig = (sem_dim / proto_dim)^(-1/2) ≈ 1.15   (当 sem_ratio=0.75)
+```
+
+这是因为 DP 高斯噪声的 L2 范数期望与维度有关，更小的维度意味着同等 ε 下更少的绝对噪声量。
+
+---
+
+## 六、差分隐私 (DP) 扩展
+
+### 6.1 动机
+
 所有 6 种算法均支持差分隐私保护，通过 `--use_dp` 统一开启。原型向量或模型权重在上传前进行 L2 裁剪 + 高斯噪声扰动。
 
-### 5.2 机制
+### 6.2 机制
 
 **原型方式 (FedProto / DPP-FL)**: 使用 `DPMechProto`，对 `(μ || logvar)` 拼接向量进行 L2 裁剪 + 高斯噪声。
 
@@ -279,7 +390,7 @@ v_noisy = v_clipped + N(0, σ² * C² * I)
 
 其中 `σ` 由二分搜索根据目标 `(ε, δ)` 确定。
 
-### 5.3 隐私预算追踪 (Moments Accountant)
+### 6.3 隐私预算追踪 (Moments Accountant)
 
 使用 **Rényi Differential Privacy (RDP)** 进行跨轮隐私预算累积：
 
@@ -289,7 +400,7 @@ v_noisy = v_clipped + N(0, σ² * C² * I)
 转换为 (ε, δ)-DP: ε = min_λ [ε_rdp_total(λ) - log(δ)/(λ-1)]
 ```
 
-### 5.4 关键参数
+### 6.4 关键参数
 
 | 参数 | 含义 | 默认值 |
 |------|------|--------|
@@ -300,7 +411,7 @@ v_noisy = v_clipped + N(0, σ² * C² * I)
 
 ---
 
-## 六、任务异构
+## 七、任务异构
 
 不同客户端拥有**不同的类别集合**。例如 20 个客户端，每个客户端随机分配到 3~5 个类别。
 
@@ -312,7 +423,7 @@ v_noisy = v_clipped + N(0, σ² * C² * I)
 
 ---
 
-## 七、模型架构
+## 八、模型架构
 
 ### 预训练 ResNet-50 Backbone (所有算法共用)
 
@@ -335,11 +446,11 @@ Bottleneck expansion=4，总参数量约 23M。
 
 ---
 
-## 八、数据划分策略
+## 九、数据划分策略
 
 [采样模块](lib/sampling.py) 支持多种 Non-IID 数据划分：
 
-### 8.1 标签倾斜 (Label Skew) —— 默认策略
+### 9.1 标签倾斜 (Label Skew) —— 默认策略
 
 每个客户端只拥有部分疾病类别的数据。对于多标签 ChestX-ray14，图片按**首个阳性标签**归类后排序分配：
 
@@ -351,17 +462,17 @@ Client 1: 疾病 [Cardiomegaly, Nodule, Pneumonia], 每类 ~100 样本
 
 "No Finding"（无疾病）样本均匀分配给所有客户端作为负样本。
 
-### 8.2 数量倾斜 (Quantity Skew)
+### 9.2 数量倾斜 (Quantity Skew)
 
 通过 `--unequal` 开启。不同客户端拥有不同数量的分片（shard）。
 
-### 8.3 本地测试集 (Local Test)
+### 9.3 本地测试集 (Local Test)
 
 `user_groups_lt`: 每个客户端的本地测试数据，仅包含该客户端训练过的疾病类别。
 
 ---
 
-## 九、系统架构
+## 十、系统架构
 
 ```
 exps/federated_main.py          ← 主入口
@@ -376,13 +487,14 @@ exps/federated_main.py          ← 主入口
 ├── lib/dist_proto/             ← 分布原型子模块
 │   ├── proto_head.py           ← ProbabilisticProtoHead (μ, logvar)
 │   ├── losses.py               ← KL, Wasserstein, MSE 损失
-│   └── aggregation.py          ← 贝叶斯融合
+│   ├── aggregation.py          ← 贝叶斯融合
+│   └── disentangle.py          ← DisentangledProtoHead + HSIC损失 (DPP-FL专属)
 ├── lib/dp/                     ← 差分隐私子模块
 │   └── mechanisms.py           ← DPMechProto, MomentsAccountant
 └── lib/visualize.py            ← t-SNE 原型可视化
 ```
 
-### 9.1 调用关系
+### 10.1 调用关系
 
 ```
 federated_main.py
@@ -419,11 +531,11 @@ federated_main.py
 
 ---
 
-## 十、对比算法详解
+## 十一、对比算法详解
 
 本实现支持 5 种 FL 算法对比，通过 `--alg` 参数切换。
 
-### 10.1 FedAvg (McMahan et al., AISTATS 2017)
+### 11.1 FedAvg (McMahan et al., AISTATS 2017)
 
 最基础的联邦学习算法，仅做权重聚合：
 
@@ -438,7 +550,7 @@ federated_main.py
 - **缺点**：Non-IID 数据下性能退化严重（client drift）
 - **参数**：无额外参数
 
-### 10.2 FedProx (Li et al., MLSys 2020)
+### 11.2 FedProx (Li et al., MLSys 2020)
 
 在 FedAvg 基础上对本地目标函数添加近端项（proximal term），限制本地模型不要偏离全局模型太远：
 
@@ -450,7 +562,7 @@ L_local = L_BCE + (μ/2) * ||w - w_t||^2
 - **缺点**：μ 需要调参；μ 太大导致收敛慢，太小等于 FedAvg
 - **参数**：`--fedprox_mu` (默认 0.01)
 
-### 10.3 FedBN (Li et al., ICLR 2021)
+### 11.3 FedBN (Li et al., ICLR 2021)
 
 针对 **feature shift**（不同客户端数据分布不同导致的特征偏移）的解决方案：
 
@@ -466,7 +578,7 @@ keep local: {bn.running_mean, bn.running_var, bn.weight, bn.bias}
 - **缺点**：标签分布偏移（label skew）场景下效果有限
 - **参数**：无额外参数
 
-### 10.4 SCAFFOLD (Karimireddy et al., ICML 2020)
+### 11.4 SCAFFOLD (Karimireddy et al., ICML 2020)
 
 使用 **control variates** 纠正 client drift：
 
@@ -480,7 +592,7 @@ keep local: {bn.running_mean, bn.running_var, bn.weight, bn.bias}
 - **缺点**：需要传输 control variate（与模型同大小），通信量翻倍；stateful（需保存每个客户端的 c_i）
 - **参数**：`--scaffold_lr` (全局 LR，默认等于 `--lr`)
 
-### 10.5 算法对比总结
+### 11.5 算法对比总结
 
 所有算法均使用 ImageNet 预训练 ResNet-50 + 可选 DP。
 
@@ -493,7 +605,7 @@ keep local: {bn.running_mean, bn.running_var, bn.weight, bn.bias}
 | **FedProto** | **原型共享基线** | 点原型 (256dx14) | **低** | 原型正则化 | 原型向量 |
 | **DPP-FL** | **原型共享 (提出)** | 高斯原型 `N(mu, sigma^2)` | **低** | 分布原型 + 贝叶斯融合 | 原型向量 |
 
-### 10.6 DPP-FL 与 FedProto 的区别
+### 11.6 DPP-FL 与 FedProto 的区别
 
 | 特性 | FedProto (基线) | DPP-FL (提出方法) |
 |------|----------------|-------------------|
@@ -501,16 +613,17 @@ keep local: {bn.running_mean, bn.running_var, bn.weight, bn.bias}
 | 原型类型 | 点向量 `p in R^d` | 高斯分布 `N(mu, sigma^2)` |
 | 聚合方式 | 简单平均 | 精度加权贝叶斯融合 |
 | 不确定性 | 不建模 | Per-client variance |
+| 原型解耦 | 无 | 语义-风格分离 + HSIC 独立性约束 |
 | 原型动量 | 无 | EMA `G_t = β*G_{t-1} + (1-β)*G_new` |
 | λ 调度 | 常数 | Warmup: `λ * min(1, round/W)` |
 | 推理温度 | 1.0 | 可配置 `-dist / T` |
 | 距离度量 | MSE | KL / Wasserstein / MSE |
 | 隐私保护 | 可选 (ε, δ)-DP | 可选 (ε, δ)-DP |
-| 适用场景 | 一般 Non-IID | 高异质性 + 隐私敏感场景 |
+| 适用场景 | 一般 Non-IID | 高异质性 + 隐私敏感 + 域偏移场景 |
 
 ---
 
-## 十一、关键参数速查
+## 十二、关键参数速查
 
 ### 算法选择
 
@@ -572,9 +685,17 @@ keep local: {bn.running_mean, bn.running_var, bn.weight, bn.bias}
 | `--temperature` | 1.0 | 原型推理温度系数 |
 | `--pretrained` | True | ImageNet 预训练 (所有算法默认开启) |
 
+### 原型解耦参数 (DPP-FL 专属)
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--use_disentangle` | False | 启用原型语义-风格解耦 |
+| `--sem_ratio` | 0.75 | 语义维度占比 |
+| `--dis_lambda` | 0.05 | 解耦独立性损失 (HSIC) 权重 |
+
 ---
 
-## 十二、运行示例
+## 十三、运行示例
 
 ```bash
 # === 所有算法均使用预训练 ResNet-50，通过 --use_dp 开启 DP ===
@@ -626,6 +747,20 @@ python exps/federated_main.py --alg dppfl \
     --proto_momentum 0.9 --temperature 0.5 --ld_warmup 50 \
     --ways 5 --num_users 20 --rounds 100
 
+# === 原型解耦 (DPP-FL 专属) ===
+# 点原型 + 解耦
+python exps/federated_main.py --alg dppfl \
+    --use_disentangle --sem_ratio 0.75 --dis_lambda 0.05 \
+    --ways 5 --shots 100 --num_users 20 --rounds 200 --ld 1.0
+
+# 分布原型 + 解耦 + DP (完整 SOTA 配方)
+python exps/federated_main.py --alg dppfl \
+    --use_distributional --dist_type kl \
+    --use_disentangle --sem_ratio 0.75 --dis_lambda 0.05 \
+    --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
+    --proto_momentum 0.9 --temperature 0.5 --ld_warmup 50 \
+    --ways 5 --num_users 20 --rounds 100
+
 # 快速测试 (MNIST)
 python exps/federated_main.py --alg fedavg \
     --model cnn --num_classes 10 --iid 1 --rounds 50 --num_users 10
@@ -633,7 +768,7 @@ python exps/federated_main.py --alg fedavg \
 
 ---
 
-## 十三、数学符号汇总
+## 十四、数学符号汇总
 
 | 符号 | 含义 |
 |------|------|
@@ -650,13 +785,17 @@ python exps/federated_main.py --alg fedavg \
 | λ | 原型损失权重 (`--ld`) |
 | μ, σ² | 高斯分布原型的均值和方差 |
 | ε, δ | 差分隐私参数 |
+| z_sem | 语义原型向量 (共享) |
+| z_style | 风格原型向量 (本地) |
+| L_dis | 解耦独立性损失 (HSIC) |
+| λ_dis | 解耦损失权重 (`--dis_lambda`) |
 | y^(i) | 样本 i 的 14 维多标签二值向量 |
 
 ---
 
-## 十四、实现细节与注意事项
+## 十五、实现细节与注意事项
 
-### 12.1 原型格式统一
+### 15.1 原型格式统一
 
 全局原型字典 `global_protos` 的 value 格式在两种模式下保持一致：
 
@@ -665,7 +804,7 @@ python exps/federated_main.py --alg fedavg \
 
 调用方不需要根据模式做不同的索引处理（已修复原有的 `[0]` 包装不对称问题）。
 
-### 12.2 客户端采样
+### 15.2 客户端采样
 
 `--frac` 参数控制每轮参与训练的客户端比例。每轮随机采样 `m = max(1, int(frac * K))` 个客户端：
 
@@ -673,7 +812,7 @@ python exps/federated_main.py --alg fedavg \
 - 增加随机性，有助于泛化
 - 未参与轮的客户端保留上一轮模型，在后续轮次可被选中继续训练
 
-### 12.3 多标签原型损失计算
+### 15.3 多标签原型损失计算
 
 原型正则化损失 `L_proto` 的计算方式（以点原型为例）：
 
@@ -686,11 +825,11 @@ loss2 = loss2 / count  # 除以所有正标签总数
 
 即平均到每个正标签上，而非每张图。这意味着有多个疾病的 X 光片对原型损失的贡献更大。
 
-### 12.4 "No Finding" 负样本处理
+### 15.4 "No Finding" 负样本处理
 
 在 Non-IID 划分时，"No Finding"（标签全为 0）的样本不按疾病标签排序，而是均匀分配给所有客户端（每个客户端至少 10 张），作为负样本参与训练。这确保了每个客户端都能学到"正常"的表示。
 
-### 12.5 分布原型的数值稳定性
+### 15.5 分布原型的数值稳定性
 
 - `logvar` 被 clamp 到 [-10, 10] 范围（`ProbabilisticProtoHead`）
 - `var = exp(logvar)`，对应方差范围约 [4.5e-5, 2.2e4]

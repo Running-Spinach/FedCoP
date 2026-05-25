@@ -11,6 +11,7 @@ lib_dir = (Path(__file__).parent).resolve()
 if str(lib_dir) not in sys.path:
     sys.path.insert(0, str(lib_dir))
 from dist_proto.losses import distributional_proto_loss
+from dist_proto.disentangle import disentanglement_loss
 
 
 class DatasetSplit(Dataset):
@@ -260,6 +261,7 @@ class LocalUpdate(object):
     def update_weights_het(self, args, idx, global_protos, model, global_round=round):
         """
         FedProto异构联邦学习的权重更新方法，结合分类损失和原型距离损失
+        支持原型解耦 (DPP-FL): 仅共享语义原型，风格原型保留本地
 
         参数:
             args: 配置参数
@@ -270,7 +272,7 @@ class LocalUpdate(object):
 
         返回:
             model.state_dict(): 更新后的模型状态字典
-            epoch_loss: 包含total/1/2三类损失的字典
+            epoch_loss: 包含total/1/2/3四类损失的字典
             acc_val.item(): 准确率
             agg_protos_label: 聚合后的本地原型字典
         """
@@ -278,6 +280,8 @@ class LocalUpdate(object):
         epoch_loss = {'total': [], '1': [], '2': [], '3': []}
 
         use_dist = getattr(args, 'use_distributional', False)
+        use_dis = getattr(args, 'use_disentangle', False)
+        dis_lambda = getattr(args, 'dis_lambda', 0.05)
 
         if self.args.optimizer == 'sgd':
             optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,
@@ -296,18 +300,70 @@ class LocalUpdate(object):
                 model.zero_grad()
                 output = model(images)
 
-                if use_dist:
+                # ── 解析模型输出 ──
+                if use_dis and use_dist:
+                    # 解耦 + 分布: (logits, mu_sem, logvar_sem, mu_style, logvar_style)
+                    log_probs, mu_sem, logvar_sem, mu_style, logvar_style = output
+                    proto_for_share = (mu_sem, logvar_sem)
+                    proto_for_style = (mu_style, logvar_style)
+                elif use_dis:
+                    # 解耦 + 点原型: (logits, z_sem, z_style)
+                    log_probs, z_sem, z_style = output
+                    proto_for_share = z_sem
+                    proto_for_style = z_style
+                elif use_dist:
                     log_probs, mu, logvar = output
+                    proto_for_share = (mu, logvar)
                 else:
                     log_probs, protos = output
+                    proto_for_share = protos
 
                 loss1 = self.criterion(log_probs, labels)
 
+                # ── 解耦独立性损失 L_dis ──
+                if use_dis:
+                    if use_dist:
+                        loss3 = disentanglement_loss(mu_sem, mu_style)
+                    else:
+                        loss3 = disentanglement_loss(z_sem, z_style)
+                else:
+                    loss3 = 0.0 * loss1
+
+                # ── 原型正则化损失 L_proto ──
                 loss_mse = nn.MSELoss()
                 if len(global_protos) == 0:
                     loss2 = 0 * loss1
                 else:
-                    if use_dist:
+                    if use_dist and use_dis:
+                        # 解耦分布原型损失：仅对语义部分计算 KL/Wasserstein
+                        loss2 = 0.0
+                        count = 0
+                        for i_lbl in range(len(labels)):
+                            for lbl_idx in range(args.num_classes):
+                                if labels[i_lbl, lbl_idx] > 0 and lbl_idx in global_protos:
+                                    g_val = global_protos[lbl_idx]
+                                    g_mu, g_logvar = (g_val if isinstance(g_val, tuple)
+                                                      else (g_val, torch.zeros_like(g_val)))
+                                    l2 = distributional_proto_loss(
+                                        mu_sem[i_lbl:i_lbl + 1], logvar_sem[i_lbl:i_lbl + 1],
+                                        g_mu.unsqueeze(0), g_logvar.unsqueeze(0),
+                                        dist_type=args.dist_type
+                                    )
+                                    loss2 += l2
+                                    count += 1
+                        loss2 = loss2 / max(count, 1)
+                    elif use_dis:
+                        # 解耦点原型损失：仅对语义部分计算 MSE
+                        loss2 = 0.0
+                        count = 0
+                        for i_lbl in range(len(labels)):
+                            proto_i = z_sem[i_lbl]
+                            for lbl_idx in range(args.num_classes):
+                                if labels[i_lbl, lbl_idx] > 0 and lbl_idx in global_protos:
+                                    loss2 += loss_mse(proto_i, global_protos[lbl_idx])
+                                    count += 1
+                        loss2 = loss2 / max(count, 1)
+                    elif use_dist:
                         # 分布原型损失：对每张图的所有正标签计算 KL/Wasserstein
                         loss2 = 0.0
                         count = 0
@@ -335,22 +391,41 @@ class LocalUpdate(object):
                                     count += 1
                         loss2 = loss2 / max(count, 1)
 
-                loss = loss1 + loss2 * args.ld
+                loss = loss1 + loss2 * args.ld + loss3 * dis_lambda
                 loss.backward()
                 optimizer.step()
 
-                # 按标签聚合本地原型（多标签：一张图贡献给所有正标签）
-                for i_lbl in range(len(labels)):
-                    for lbl_idx in range(args.num_classes):
-                        if label_g[i_lbl, lbl_idx] > 0:
-                            if use_dist:
-                                proto_val = (mu[i_lbl, :].detach(), logvar[i_lbl, :].detach())
-                            else:
-                                proto_val = protos[i_lbl, :].detach()
-                            if lbl_idx in agg_protos_label:
-                                agg_protos_label[lbl_idx].append(proto_val)
-                            else:
-                                agg_protos_label[lbl_idx] = [proto_val]
+                # ── 按标签聚合本地原型 ──
+                # 解耦模式仅聚合语义原型；原始模式聚合全部原型
+                if use_dis:
+                    if use_dist:
+                        sem_feat = mu_sem
+                    else:
+                        sem_feat = z_sem
+                    for i_lbl in range(len(labels)):
+                        for lbl_idx in range(args.num_classes):
+                            if label_g[i_lbl, lbl_idx] > 0:
+                                if use_dist:
+                                    proto_val = (mu_sem[i_lbl, :].detach(),
+                                                 logvar_sem[i_lbl, :].detach())
+                                else:
+                                    proto_val = sem_feat[i_lbl, :].detach()
+                                if lbl_idx in agg_protos_label:
+                                    agg_protos_label[lbl_idx].append(proto_val)
+                                else:
+                                    agg_protos_label[lbl_idx] = [proto_val]
+                else:
+                    for i_lbl in range(len(labels)):
+                        for lbl_idx in range(args.num_classes):
+                            if label_g[i_lbl, lbl_idx] > 0:
+                                if use_dist:
+                                    proto_val = (mu[i_lbl, :].detach(), logvar[i_lbl, :].detach())
+                                else:
+                                    proto_val = protos[i_lbl, :].detach()
+                                if lbl_idx in agg_protos_label:
+                                    agg_protos_label[lbl_idx].append(proto_val)
+                                else:
+                                    agg_protos_label[lbl_idx] = [proto_val]
 
                 # 多标签 per-label 准确率（所有标签位置的平均匹配率）
                 preds = (torch.sigmoid(log_probs) > 0.5).float()
@@ -367,14 +442,17 @@ class LocalUpdate(object):
                 batch_loss['total'].append(loss.item())
                 batch_loss['1'].append(loss1.item())
                 batch_loss['2'].append(loss2.item())
+                batch_loss['3'].append(loss3.item() if isinstance(loss3, torch.Tensor) else loss3)
 
             epoch_loss['total'].append(sum(batch_loss['total']) / len(batch_loss['total']))
             epoch_loss['1'].append(sum(batch_loss['1']) / len(batch_loss['1']))
             epoch_loss['2'].append(sum(batch_loss['2']) / len(batch_loss['2']))
+            epoch_loss['3'].append(sum(batch_loss['3']) / len(batch_loss['3']))
 
         epoch_loss['total'] = sum(epoch_loss['total']) / len(epoch_loss['total'])
         epoch_loss['1'] = sum(epoch_loss['1']) / len(epoch_loss['1'])
         epoch_loss['2'] = sum(epoch_loss['2']) / len(epoch_loss['2'])
+        epoch_loss['3'] = sum(epoch_loss['3']) / len(epoch_loss['3'])
 
         return model.state_dict(), epoch_loss, acc_val.item(), agg_protos_label
 
@@ -571,6 +649,7 @@ def test_inference_new_het(args, local_model_list, test_dataset, global_protos=[
     """
     loss_mse = nn.MSELoss()
     use_dist = getattr(args, 'use_distributional', False)
+    use_dis = getattr(args, 'use_disentangle', False)
     if temperature is None:
         temperature = getattr(args, 'temperature', 1.0)
     device = args.device
@@ -584,12 +663,21 @@ def test_inference_new_het(args, local_model_list, test_dataset, global_protos=[
         for idx in range(args.num_users):
             model = local_model_list[idx]
             output = model(images)
-            if use_dist and len(output) == 3:
-                _, mu, _ = output
-                protos_list.append(mu)
+            # 解耦模式仅取语义特征用于原型匹配
+            if use_dis and use_dist:
+                _, _, _, _, _ = output
+                proto_feat = output[2]   # mu_sem (index 2 in the 5-tuple)
+                protos_list.append(proto_feat)
+            elif use_dis:
+                _, _, _ = output
+                proto_feat = output[1]   # z_sem (index 1 in the 3-tuple)
+                protos_list.append(proto_feat)
+            elif use_dist and len(output) >= 3:
+                proto_feat = output[1]   # mu (index 1)
+                protos_list.append(proto_feat)
             else:
-                _, protos = output
-                protos_list.append(protos)
+                proto_feat = output[1]   # protos (index 1)
+                protos_list.append(proto_feat)
 
         # 集成所有客户端的原型
         ensem_proto = torch.zeros_like(protos_list[0])
@@ -633,9 +721,21 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
     """
     loss_mse = nn.MSELoss()
     use_dist = getattr(args, 'use_distributional', False)
+    use_dis = getattr(args, 'use_disentangle', False)
     if temperature is None:
         temperature = getattr(args, 'temperature', 1.0)
     device = args.device
+
+    def _extract_proto_feat(output):
+        """从模型输出中提取用于原型比对的语义特征向量"""
+        if use_dis and use_dist:
+            return output[2]   # mu_sem (5-tuple: logits, mu_sem, logvar_sem, mu_style, logvar_style)
+        elif use_dis:
+            return output[1]   # z_sem (3-tuple: logits, z_sem, z_style)
+        elif use_dist and len(output) >= 3:
+            return output[1]   # mu (3-tuple: logits, mu, logvar)
+        else:
+            return output[1]   # protos (2-tuple: logits, protos)
 
     acc_list_g = []
     acc_list_l = []
@@ -673,13 +773,10 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
             model.zero_grad()
             output = model(images)
 
-            if use_dist and len(output) == 3:
-                outputs, mu, logvar = output
-            else:
-                outputs, protos = output
+            outputs = output[0]
+            proto_feats = _extract_proto_feat(output)
 
             # 计算到每个全局原型的距离 → 负距离/T 作为 logit → sigmoid → 二值预测
-            proto_feats = mu if (use_dist and len(output) == 3) else protos
             proto_logits = torch.zeros(images.shape[0], args.num_classes, device=device)
             for i in range(images.shape[0]):
                 for j in range(args.num_classes):
@@ -697,6 +794,7 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
             total_val += labels.numel()
 
             # 记录平均原型损失（对所有全局类别取平均）
+            # 解耦模式下仅使用语义特征
             if len(global_protos) > 0:
                 loss2 = 0.0
                 count = 0
@@ -704,9 +802,9 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
                     if use_dist:
                         g_mu, g_logvar = global_protos[lbl_idx]
                         g_var = torch.exp(g_logvar) + 1e-8
-                        loss2 += 0.5 * (((mu - g_mu.unsqueeze(0)) ** 2) / (g_var.unsqueeze(0) + 1e-8)).mean().item()
+                        loss2 += 0.5 * (((proto_feats - g_mu.unsqueeze(0)) ** 2) / (g_var.unsqueeze(0) + 1e-8)).mean().item()
                     else:
-                        loss2 += loss_mse(protos, global_protos[lbl_idx]).item()
+                        loss2 += loss_mse(proto_feats, global_protos[lbl_idx]).item()
                     count += 1
                 loss2 = loss2 / max(count, 1)
 
@@ -716,6 +814,20 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
         loss_list.append(loss2)
 
     return acc_list_l, acc_list_g, loss_list
+
+
+def _get_proto_tensor(output, args):
+    """从模型输出中提取原型向量（解耦感知）"""
+    use_dist = getattr(args, 'use_distributional', False)
+    use_dis = getattr(args, 'use_disentangle', False)
+    if use_dis and use_dist:
+        return output[2]   # mu_sem
+    elif use_dis:
+        return output[1]   # z_sem
+    elif use_dist:
+        return output[1]   # mu
+    else:
+        return output[1]   # protos
 
 
 def get_proto_vec(args, local_model_list, dataset, user_groups_gt):
@@ -745,10 +857,7 @@ def get_proto_vec(args, local_model_list, dataset, user_groups_gt):
         for batch_idx, (images, label_g) in enumerate(DataLoader(DatasetSplit(dataset, user_groups_gt[i]), batch_size=64, shuffle=False)):
             images_l, labels_l = images.to(args.device), label_g.to(args.device)
             output = model(images_l)
-            if len(output) == 3:
-                _, protos_tmp, _ = output
-            else:
-                _, protos_tmp = output
+            protos_tmp = _get_proto_tensor(output, args)
             for proto in protos_tmp:
                 protos.append(proto)
             for label in labels_l:
@@ -791,10 +900,7 @@ def get_proto_vec_lt(args, local_model_list, dataset, user_groups_gt):
         for batch_idx, (images, label_g) in enumerate(DataLoader(DatasetSplit(dataset, user_groups_gt[i]), batch_size=64, shuffle=False)):
             images_l, labels_l = images.to(args.device), label_g.to(args.device)
             output = model(images_l)
-            if len(output) == 3:
-                _, protos, _ = output
-            else:
-                _, protos = output
+            protos = _get_proto_tensor(output, args)
 
             for k in range(len(labels_l)):
                 lbl = label_g[k].item() if isinstance(label_g[k], torch.Tensor) else label_g[k]

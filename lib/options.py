@@ -102,5 +102,13 @@ def args_parser():
     parser.add_argument('--temperature', type=float, default=1.0,
                         help='DPP-FL: 原型推理温度系数 (越小越尖锐)')
 
+    # 原型解耦参数（DPP-FL 专属，仅 DPP-FL 算法支持）
+    parser.add_argument('--use_disentangle', action='store_true',
+                        help='DPP-FL: 启用原型解耦 (语义-风格分离)')
+    parser.add_argument('--sem_ratio', type=float, default=0.75,
+                        help='DPP-FL: 语义维度占比 (0-1, 剩余为风格维度)')
+    parser.add_argument('--dis_lambda', type=float, default=0.05,
+                        help='DPP-FL: 解耦独立性损失权重')
+
     args = parser.parse_args()
     return args

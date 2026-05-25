@@ -227,6 +227,11 @@ def exp_details(args):
         print(f'    LD warmup rounds    : {getattr(args, "ld_warmup", 50)}')
         print(f'    Temperature         : {getattr(args, "temperature", 1.0)}')
 
+        if getattr(args, 'use_disentangle', False):
+            sem_ratio = getattr(args, 'sem_ratio', 0.75)
+            print(f'    Prototype disentangle : Enabled (sem={sem_ratio:.0%}, style={(1-sem_ratio):.0%})')
+            print(f'    Disentangle lambda    : {getattr(args, "dis_lambda", 0.05)}')
+
     print(f'    Pretrained backbone : {getattr(args, "pretrained", True)}')
 
     if getattr(args, 'use_dp', False):

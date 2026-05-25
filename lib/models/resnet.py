@@ -195,6 +195,19 @@ class DPPFLResNet(nn.Module):
         # ── 分类头 ──
         self.fc2 = nn.Linear(self.proto_dim, self.num_classes)
 
+        # ── 原型解耦（DPP-FL 专属）──
+        self.use_disentangle = getattr(args, 'use_disentangle', False)
+        if self.use_disentangle:
+            from dist_proto.disentangle import DisentangledProtoHead
+            sem_ratio = getattr(args, 'sem_ratio', 0.75)
+            self.dis_head = DisentangledProtoHead(
+                proto_dim=self.proto_dim,
+                sem_ratio=sem_ratio,
+                use_distributional=self.use_distributional,
+            )
+        else:
+            self.dis_head = None
+
     def forward(self, x):
         x = self.stem(x)
         x = self.layer1(x)
@@ -205,10 +218,24 @@ class DPPFLResNet(nn.Module):
         x = torch.flatten(x, 1)          # (B, 2048)
 
         proto_features = F.relu(self.fc1(x))  # (B, proto_dim)
-        logits = self.fc2(proto_features)     # (B, num_classes)
 
-        if self.use_distributional and self.proto_head is not None:
-            mu, logvar = self.proto_head(proto_features)
-            return logits, mu, logvar
+        if self.use_disentangle and self.dis_head is not None:
+            # 解耦模式：仅共享语义原型，风格原型保留本地
+            if self.use_distributional:
+                (_mu_full, _logvar_full,
+                 mu_sem, logvar_sem,
+                 mu_style, logvar_style) = self.dis_head(proto_features)
+                logits = self.fc2(proto_features)
+                return logits, mu_sem, logvar_sem, mu_style, logvar_style
+            else:
+                _z_full, z_sem, z_style = self.dis_head(proto_features)
+                logits = self.fc2(proto_features)
+                return logits, z_sem, z_style
         else:
-            return logits, proto_features
+            # 原始模式
+            logits = self.fc2(proto_features)
+            if self.use_distributional and self.proto_head is not None:
+                mu, logvar = self.proto_head(proto_features)
+                return logits, mu, logvar
+            else:
+                return logits, proto_features
