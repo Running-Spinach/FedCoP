@@ -16,7 +16,13 @@ from chestxray import ChestXray14
 
 
 class TransformedSubset:
-    """带独立 transform 的数据子集包装器，避免 Subset 共享底层 dataset.transform"""
+    """带独立 transform 的数据子集包装器，避免 Subset 共享底层 dataset.transform
+
+    参数:
+        dataset: 原始完整数据集
+        indices: 要提取的样本索引列表
+        transform: 独立应用于每个样本的图像变换
+    """
 
     def __init__(self, dataset, indices, transform):
         self.dataset = dataset
@@ -24,9 +30,11 @@ class TransformedSubset:
         self.transform = transform
 
     def __len__(self):
+        """返回子集样本总数"""
         return len(self.indices)
 
     def __getitem__(self, idx):
+        """返回指定索引的 (图像, 标签)，自动应用 transform"""
         img, label = self.dataset[self.indices[idx]]
         if self.transform:
             img = self.transform(img)
@@ -34,13 +42,28 @@ class TransformedSubset:
 
 
 def get_dataset(args, n_list, k_list):
-    if args.model == 'resnet50':
+    """加载数据集并按 Non-IID/IID 划分给各客户端
+
+    参数:
+        args: 配置对象（model, data_dir, num_users, iid 等）
+        n_list: 每个客户端拥有的类别数量列表
+        k_list: 每个客户端每类拥有的样本数量列表
+
+    返回:
+        train_dataset: 训练集
+        test_dataset: 测试集
+        user_groups: 训练数据客户端划分 {client_idx: data indices}
+        user_groups_lt: 测试数据客户端划分（Non-IID 模式有值，IID 为 None）
+        classes_list: 每个客户端的类别列表
+        classes_list_gt: 用于测试的客户端类别列表
+    """
+    if args.dataset == 'chestxray14':
         # ── ChestX-ray14: 多标签数据集 ──
         data_dir = args.data_dir + 'chestxray'
         image_size = getattr(args, 'image_size', 224)
 
         train_transform = transforms.Compose([
-            transforms.Grayscale(3),
+            transforms.Grayscale(3),#3通道灰度图
             transforms.Resize((image_size, image_size)),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
@@ -140,6 +163,16 @@ def average_weights_fedbn(w):
 
 
 def agg_func(protos, use_distributional=False):
+    """对单个客户端内同一标签的多个原型取平均（本地聚合）
+
+    参数:
+        protos: {label: [proto_val, ...]} 单客户端原型字典
+        use_distributional: True 则对 (mu, logvar) 做混合高斯平均，
+                           False 则对点原型做算术平均
+
+    返回:
+        protos: 聚合后的字典 {label: single_proto}
+    """
     for label, proto_list in protos.items():
         if len(proto_list) > 1:
             if use_distributional:
@@ -164,6 +197,19 @@ def agg_func(protos, use_distributional=False):
 
 
 def proto_aggregation(local_protos_list, use_distributional=False):
+    """跨客户端全局原型聚合
+
+    将多个客户端上传的同类原型进行融合：
+      - 点原型: 算术平均
+      - 分布原型: 贝叶斯精度加权融合
+
+    参数:
+        local_protos_list: {client_idx: {label: proto}}
+        use_distributional: True 则使用贝叶斯融合，False 则算术平均
+
+    返回:
+        聚合后的全局原型字典 {label: fused_proto}
+    """
     agg_protos_label = dict()
     for idx in local_protos_list:
         local_protos = local_protos_list[idx]
@@ -190,6 +236,7 @@ def proto_aggregation(local_protos_list, use_distributional=False):
 
 
 def exp_details(args):
+    """打印实验配置详情：算法、模型、优化器、联邦参数、隐私参数等"""
     print('\nExperimental details:')
     print(f'    Algorithm : {args.alg}')
     print(f'    Model     : {args.model}')

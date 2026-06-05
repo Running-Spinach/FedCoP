@@ -53,9 +53,11 @@ class ChestXray14(Dataset):
         self.labels = np.array(self.labels)
 
     def __len__(self):
+        """返回数据集样本总数"""
         return len(self.filenames)
 
     def __getitem__(self, idx):
+        """返回指定索引的 (图像, 标签) 元组，图像为 PIL → transform → Tensor"""
         img = Image.open(self.filenames[idx]).convert('L')
         img = img.resize((self.image_size, self.image_size), Image.BICUBIC)
 
@@ -63,11 +65,13 @@ class ChestXray14(Dataset):
             img = self.transform(img)
 
         label = torch.from_numpy(self.labels[idx])
-        return img, label
+        return img, label#one-hot 标签向量
 
     def num_classes(self):
+        """返回类别总数（14 种疾病）"""
         return len(CHESTXRAY14_LABELS)
 
     @staticmethod
     def label_names():
+        """返回疾病标签名称列表（14 种胸部X光疾病）"""
         return CHESTXRAY14_LABELS

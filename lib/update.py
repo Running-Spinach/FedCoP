@@ -89,6 +89,7 @@ class LocalUpdate(object):
         return trainloader
 
     def _get_optimizer(self, model):
+        """根据配置返回 SGD 或 Adam 优化器"""
         if self.args.optimizer == 'sgd':
             return torch.optim.SGD(model.parameters(), lr=self.args.lr, momentum=0.5)
         elif self.args.optimizer == 'adam':
@@ -140,6 +141,83 @@ class LocalUpdate(object):
             epoch_loss.append(sum(batch_loss) / len(batch_loss))
 
         return model.state_dict(), sum(epoch_loss) / len(epoch_loss), acc_val.item()
+
+    def update_weights_FedP(self, args, idx, global_protos, model, global_round=round):
+        
+        model.train()
+        epoch_loss = {'total':[],'1':[], '2':[], '3':[]}
+
+        # Set optimizer for the local updates
+        if self.args.optimizer == 'sgd':
+            optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,
+                                        momentum=0.5)
+        elif self.args.optimizer == 'adam':
+            optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
+                                         weight_decay=1e-4)
+
+        for iter in range(self.args.train_ep):
+            batch_loss = {'total':[],'1':[], '2':[], '3':[]}
+            agg_protos_label = {}#
+            for batch_idx, (images, label_g) in enumerate(self.trainloader):
+                images, labels = images.to(self.device), label_g.to(self.device)
+
+                # loss1: cross-entrophy loss, loss2: proto distance loss
+                model.zero_grad()
+                log_probs, protos = model(images)
+                loss1 = self.criterion(log_probs, labels)
+
+                loss_mse = nn.MSELoss()
+                if len(global_protos) == 0:
+                    loss2 = 0*loss1
+                else:
+                    # 多标签原型损失：对每个样本的所有正标签计算 MSE
+                    loss2 = 0*loss1
+                    count = 0
+                    for i_lbl in range(len(labels)):
+                        proto_i = protos[i_lbl]
+                        for lbl_idx in range(args.num_classes):
+                            if labels[i_lbl, lbl_idx] > 0 and lbl_idx in global_protos:
+                                loss2 += loss_mse(proto_i, global_protos[lbl_idx])
+                                count += 1
+                    loss2 = loss2 / max(count, 1)
+
+                loss = loss1 + loss2 * args.ld
+                loss.backward()
+                optimizer.step()
+
+                # 多标签原型聚合：每个样本的原型归属到其所有正标签
+                for i_lbl in range(len(labels)):
+                    for lbl_idx in range(args.num_classes):
+                        if label_g[i_lbl, lbl_idx] > 0:
+                            proto_val = protos[i_lbl, :].detach()
+                            if lbl_idx in agg_protos_label:
+                                agg_protos_label[lbl_idx].append(proto_val)
+                            else:
+                                agg_protos_label[lbl_idx] = [proto_val]
+
+                # 多标签 per-label 准确率
+                preds = (torch.sigmoid(log_probs) > 0.5).float()
+                acc_val = (preds == labels).float().mean()
+
+                if self.args.verbose and (batch_idx % 10 == 0):
+                    print('| Global Round : {} | User: {} | Local Epoch : {} | [{}/{} ({:.0f}%)]\tLoss: {:.3f} | Acc: {:.3f}'.format(
+                        global_round, idx, iter, batch_idx * len(images),
+                        len(self.trainloader.dataset),
+                        100. * batch_idx / len(self.trainloader),
+                        loss.item(),
+                        acc_val.item()))
+                batch_loss['total'].append(loss.item())
+                batch_loss['1'].append(loss1.item())
+                batch_loss['2'].append(loss2.item())
+            epoch_loss['total'].append(sum(batch_loss['total'])/len(batch_loss['total']))
+            epoch_loss['1'].append(sum(batch_loss['1']) / len(batch_loss['1']))
+            epoch_loss['2'].append(sum(batch_loss['2']) / len(batch_loss['2']))
+
+        epoch_loss['total'] = sum(epoch_loss['total']) / len(epoch_loss['total'])
+        epoch_loss['1'] = sum(epoch_loss['1']) / len(epoch_loss['1'])
+        epoch_loss['2'] = sum(epoch_loss['2']) / len(epoch_loss['2'])
+
+        return model.state_dict(), epoch_loss, acc_val.item(), agg_protos_label
 
     def update_weights_fedprox(self, idx, global_model_state, model, global_round):
         """
@@ -258,10 +336,9 @@ class LocalUpdate(object):
 
         return model.state_dict(), avg_loss, acc_val.item(), c_local_new, c_delta
 
-    def update_weights_het(self, args, idx, global_protos, model, global_round=round):
+    def update_weights_DPPFL(self, args, idx, global_protos, model, global_round=round):
         """
-        FedProto异构联邦学习的权重更新方法，结合分类损失和原型距离损失
-        支持原型解耦 (DPP-FL): 仅共享语义原型，风格原型保留本地
+        DPP-FL: 仅共享语义原型，风格原型保留本地
 
         参数:
             args: 配置参数
@@ -479,125 +556,13 @@ class LocalUpdate(object):
             batch_loss = self.criterion(outputs, labels)
             loss += batch_loss.item()
 
-            _, pred_labels = torch.max(outputs, 1)
-            pred_labels = pred_labels.view(-1)
-            correct += torch.sum(torch.eq(pred_labels, labels)).item()
-            total += len(labels)
+            # 多标签 per-label 准确率
+            preds = (torch.sigmoid(outputs) > 0.5).float()
+            correct += (preds == labels).float().sum().item()
+            total += labels.numel()
 
         accuracy = correct / total
         return accuracy, loss
-
-
-class LocalTest(object):
-    """
-    本地测试类，用于执行单个客户端的模型测试和微调
-    """
-
-    def __init__(self, args, dataset, idxs):
-        """
-        初始化本地测试对象
-
-        参数:
-            args: 配置参数
-            dataset: 测试数据集
-            idxs: 该客户端的数据索引
-        """
-        self.args = args
-        self.testloader = self.test_split(dataset, list(idxs))
-        self.device = args.device
-        self.criterion = nn.BCEWithLogitsLoss().to(args.device)
-
-    def test_split(self, dataset, idxs):
-        """
-        根据索引构建测试数据加载器
-
-        参数:
-            dataset: 数据集
-            idxs: 数据索引列表
-
-        返回:
-            testloader: 测试数据加载器
-        """
-        idxs_test = idxs[:int(1 * len(idxs))]
-
-        testloader = DataLoader(DatasetSplit(dataset, idxs_test),
-                                batch_size=64, shuffle=False)
-        return testloader
-
-    def get_result(self, args, idx, classes_list, model):
-        """
-        获取本地测试结果
-
-        参数:
-            args: 配置参数
-            idx: 客户端索引
-            classes_list: 类别列表
-            model: 待评估模型
-
-        返回:
-            loss: 损失值
-            acc: 准确率
-        """
-        model.eval()
-        loss, total, correct = 0.0, 0.0, 0.0
-        for batch_idx, (images, labels) in enumerate(self.testloader):
-            images, labels = images.to(self.device), labels.to(self.device)
-            model.zero_grad()
-            output = model(images)
-            if isinstance(output, tuple):
-                outputs = output[0]
-            else:
-                outputs = output
-            batch_loss = self.criterion(outputs, labels)
-            loss += batch_loss.item()
-
-            outputs = outputs[:, 0: args.num_classes]
-            _, pred_labels = torch.max(outputs, 1)
-            pred_labels = pred_labels.view(-1)
-            correct += torch.sum(torch.eq(pred_labels, labels)).item()
-            total += len(labels)
-
-        acc = correct / total
-        return loss, acc
-
-    def fine_tune(self, args, dataset, idxs, model):
-        """
-        在本地测试数据上微调模型
-
-        参数:
-            args: 配置参数
-            dataset: 数据集
-            idxs: 数据索引
-            model: 待微调模型
-
-        返回:
-            model: 微调后的模型
-        """
-        trainloader = self.test_split(dataset, list(idxs))
-        model.train()
-        if self.args.optimizer == 'sgd':
-            optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.5)
-        elif self.args.optimizer == 'adam':
-            optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-4)
-
-        for iter in range(10):
-            for batch_idx, (images, labels) in enumerate(trainloader):
-                images, labels = images.to(self.device), labels.to(self.device)
-
-                model.zero_grad()
-                output = model(images)
-                if isinstance(output, tuple):
-                    outputs = output[0]
-                else:
-                    outputs = output
-                outputs = outputs[:, 0:args.num_classes]
-                loss = self.criterion(outputs, labels)
-
-                loss.backward()
-                optimizer.step()
-
-        return model
-
 
 def eval_clients_multilabel(args, local_model_list, test_dataset, user_groups_gt):
     """
@@ -640,72 +605,86 @@ def eval_clients_multilabel(args, local_model_list, test_dataset, user_groups_gt
 
     return acc_list
 
-
-def test_inference_new_het(args, local_model_list, test_dataset, global_protos=[], temperature=None):
-    """全局测试推理：基于原型最近邻距离的多标签分类
-
-    返回:
-        acc: per-label 准确率
+def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list, user_groups_gt, global_protos=[]):
+    """ Returns the test accuracy and loss.
     """
+    loss, total, correct = 0.0, 0.0, 0.0
     loss_mse = nn.MSELoss()
-    use_dist = getattr(args, 'use_distributional', False)
-    use_dis = getattr(args, 'use_disentangle', False)
-    if temperature is None:
-        temperature = getattr(args, 'temperature', 1.0)
+
     device = args.device
-    testloader = DataLoader(test_dataset, batch_size=64, shuffle=False)
+    criterion = nn.NLLLoss().to(device)
 
-    total_val, correct_val = 0.0, 0.0
+    acc_list_g = []
+    acc_list_l = []
+    loss_list = []
+    for idx in range(args.num_users):
+        model = local_model_list[idx]
+        model.to(args.device)
+        testloader = DataLoader(DatasetSplit(test_dataset, user_groups_gt[idx]), batch_size=64, shuffle=True)
 
-    for batch_idx, (images, labels) in enumerate(testloader):
-        images, labels = images.to(device), labels.to(device)
-        protos_list = []
-        for idx in range(args.num_users):
-            model = local_model_list[idx]
-            output = model(images)
-            # 解耦模式仅取语义特征用于原型匹配
-            if use_dis and use_dist:
-                _, _, _, _, _ = output
-                proto_feat = output[2]   # mu_sem (index 2 in the 5-tuple)
-                protos_list.append(proto_feat)
-            elif use_dis:
-                _, _, _ = output
-                proto_feat = output[1]   # z_sem (index 1 in the 3-tuple)
-                protos_list.append(proto_feat)
-            elif use_dist and len(output) >= 3:
-                proto_feat = output[1]   # mu (index 1)
-                protos_list.append(proto_feat)
-            else:
-                proto_feat = output[1]   # protos (index 1)
-                protos_list.append(proto_feat)
+        # test (local model)
+        model.eval()
+        for batch_idx, (images, labels) in enumerate(testloader):
+            images, labels = images.to(device), labels.to(device)
+            model.zero_grad()
+            outputs, protos = model(images)
 
-        # 集成所有客户端的原型
-        ensem_proto = torch.zeros_like(protos_list[0])
-        for p in protos_list:
-            ensem_proto += p
-        ensem_proto /= len(protos_list)
+            batch_loss = criterion(outputs, labels)
+            loss += batch_loss.item()
 
-        # 计算到每个全局原型的距离 → 负距离作为 logit
-        proto_logits = torch.zeros(images.shape[0], args.num_classes, device=device)
-        for i in range(images.shape[0]):
-            for j in range(args.num_classes):
-                if j in global_protos:
-                    if use_dist:
-                        g_mu, g_logvar = global_protos[j]
-                        g_var = torch.exp(g_logvar) + 1e-8
-                        dist = 0.5 * (((ensem_proto[i, :] - g_mu) ** 2) / g_var).sum()
-                    else:
-                        dist = loss_mse(ensem_proto[i, :], global_protos[j])
-                    proto_logits[i, j] = -dist / temperature
+            # prediction
+            _, pred_labels = torch.max(outputs, 1)
+            pred_labels = pred_labels.view(-1)
+            correct += torch.sum(torch.eq(pred_labels, labels)).item()
+            total += len(labels)
 
-        preds = (torch.sigmoid(proto_logits) > 0.5).float()
-        correct_val += (preds == labels).float().sum().item()
-        total_val += labels.numel()
+        acc = correct / total
+        print('| User: {} | Global Test Acc w/o protos: {:.3f}'.format(idx, acc))
+        acc_list_l.append(acc)
 
-    return correct_val / total_val
+        # test (use global proto)
+        if global_protos!=[]:
+            for batch_idx, (images, labels) in enumerate(testloader):
+                images, labels = images.to(device), labels.to(device)
+                model.zero_grad()
+                outputs, protos = model(images)
 
+                # compute the dist between protos and global_protos
+                a_large_num = 100
+                dist = a_large_num * torch.ones(size=(images.shape[0], args.num_classes)).to(device)  # initialize a distance matrix
+                for i in range(images.shape[0]):
+                    for j in range(args.num_classes):
+                        if j in global_protos.keys() and j in classes_list[idx]:
+                            d = loss_mse(protos[i, :], global_protos[j][0])
+                            dist[i, j] = d
 
-def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list, user_groups_gt, global_protos=[], temperature=None):
+                # prediction
+                _, pred_labels = torch.min(dist, 1)
+                pred_labels = pred_labels.view(-1)
+                correct += torch.sum(torch.eq(pred_labels, labels)).item()
+                total += len(labels)
+
+                # compute loss
+                proto_new = copy.deepcopy(protos.data)
+                i = 0
+                for label in labels:
+                    if label.item() in global_protos.keys():
+                        proto_new[i, :] = global_protos[label.item()][0].data
+                    i += 1
+                loss2 = loss_mse(proto_new, protos)
+                if args.device == 'cuda':
+                    loss2 = loss2.cpu().detach().numpy()
+                else:
+                    loss2 = loss2.detach().numpy()
+
+            acc = correct / total
+            print('| User: {} | Global Test Acc with protos: {:.5f}'.format(idx, acc))
+            acc_list_g.append(acc)
+            loss_list.append(loss2)
+
+    return acc_list_l, acc_list_g, loss_list
+
+def test_inference_new_het_lt_DPPFL(args, local_model_list, test_dataset, classes_list, user_groups_gt, global_protos=[], temperature=None):
     """多标签联邦学习测试：分别评估模型自身分类和原型最近邻分类的效果
 
     参数:
@@ -815,115 +794,3 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
 
     return acc_list_l, acc_list_g, loss_list
 
-
-def _get_proto_tensor(output, args):
-    """从模型输出中提取原型向量（解耦感知）"""
-    use_dist = getattr(args, 'use_distributional', False)
-    use_dis = getattr(args, 'use_disentangle', False)
-    if use_dis and use_dist:
-        return output[2]   # mu_sem
-    elif use_dis:
-        return output[1]   # z_sem
-    elif use_dist:
-        return output[1]   # mu
-    else:
-        return output[1]   # protos
-
-
-def get_proto_vec(args, local_model_list, dataset, user_groups_gt):
-    """
-    提取所有客户端的原型向量（用于可视化分析）
-
-    参数:
-        args: 配置参数
-        local_model_list: 本地模型列表
-        dataset: 数据集
-        user_groups_gt: 用户测试数据分组
-
-    返回:
-        x: 原型向量数组 (n_samples, proto_dim)
-        y: 标签数组 (n_samples,)
-        d: 客户端索引数组 (n_samples,)
-    """
-    x = []
-    y = []
-    d = []
-
-    for i in range(args.num_users):
-        model = local_model_list[i]
-        model.eval()
-        protos = []
-        labels = []
-        for batch_idx, (images, label_g) in enumerate(DataLoader(DatasetSplit(dataset, user_groups_gt[i]), batch_size=64, shuffle=False)):
-            images_l, labels_l = images.to(args.device), label_g.to(args.device)
-            output = model(images_l)
-            protos_tmp = _get_proto_tensor(output, args)
-            for proto in protos_tmp:
-                protos.append(proto)
-            for label in labels_l:
-                labels.append(label)
-
-        for idx in range(len(labels)):
-            if args.device == 'cuda':
-                tmp = protos[idx].cpu().detach().numpy()
-            else:
-                tmp = protos[idx].detach().numpy()
-            x.append(tmp)
-            y.append(labels[idx].item())
-            d.append(i)
-
-    x = np.array(x)
-    y = np.array(y)
-    d = np.array(d)
-
-    return x, y, d
-
-
-def get_proto_vec_lt(args, local_model_list, dataset, user_groups_gt):
-    """
-    提取并保存按标签聚合后的原型向量（用于后续可视化）
-
-    参数:
-        args: 配置参数
-        local_model_list: 本地模型列表
-        dataset: 数据集
-        user_groups_gt: 用户测试数据分组
-    """
-    x = []
-    y = []
-    d = []
-
-    for i in range(args.num_users):
-        model = local_model_list[i]
-        model.eval()
-        agg_protos_label = {}
-        for batch_idx, (images, label_g) in enumerate(DataLoader(DatasetSplit(dataset, user_groups_gt[i]), batch_size=64, shuffle=False)):
-            images_l, labels_l = images.to(args.device), label_g.to(args.device)
-            output = model(images_l)
-            protos = _get_proto_tensor(output, args)
-
-            for k in range(len(labels_l)):
-                lbl = label_g[k].item() if isinstance(label_g[k], torch.Tensor) else label_g[k]
-                if lbl in agg_protos_label:
-                    agg_protos_label[lbl].append(protos[k, :])
-                else:
-                    agg_protos_label[lbl] = [protos[k, :]]
-
-        for label, proto_list in agg_protos_label.items():
-            for proto in proto_list:
-                if args.device == 'cuda':
-                    tmp = proto.cpu().detach().numpy()
-                else:
-                    tmp = proto.detach().numpy()
-                x.append(tmp)
-                y.append(label)
-                d.append(i)
-
-    x = np.array(x)
-    y = np.array(y)
-    d = np.array(d)
-    np.save('./' + args.alg + '_protos.npy', x)
-    np.save('./' + args.alg + '_labels.npy', y)
-    np.save('./' + args.alg + '_idx.npy', d)
-
-    print("Save protos and labels successfully.")

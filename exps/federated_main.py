@@ -2,14 +2,15 @@
 # 支持 6 种 FL 算法（全部使用预训练骨干 + 差分隐私进行公平对比）：
 #   FedProto, DPP-FL, FedAvg, FedProx, FedBN, SCAFFOLD
 
-import copy, sys
-import time
-import numpy as np
-from tqdm import tqdm
-import torch
-from tensorboardX import SummaryWriter
-import random
-from pathlib import Path
+import copy, sys              # 深拷贝 / 系统路径管理
+import time                     # 计时与时间戳
+import numpy as np              # 数值计算、数组操作
+from tqdm import tqdm           # 进度条显示
+import torch                    # 深度学习框架
+
+from tensorboardX import SummaryWriter  # TensorBoard 日志记录
+import random                   # 随机数生成（种子设置）
+from pathlib import Path        # 跨平台路径处理
 
 lib_dir = (Path(__file__).parent / ".." / "lib").resolve()
 if str(lib_dir) not in sys.path:
@@ -18,14 +19,14 @@ mod_dir = (Path(__file__).parent / ".." / "lib" / "models").resolve()
 if str(mod_dir) not in sys.path:
     sys.path.insert(0, str(mod_dir))
 
-from options import args_parser
-from update import (LocalUpdate, test_inference_new_het_lt,
-                    eval_clients_multilabel)
-from models.resnet import DPPFLResNet
-from utils import (get_dataset, average_weights, average_weights_fedbn,
-                   exp_details, proto_aggregation, agg_func)
-from dp import (DPMechProto, DPMechWeight, MomentsAccountant,
-                compute_noise_multiplier_from_epsilon)
+from options import args_parser                              # 命令行参数解析
+from update import (LocalUpdate, test_inference_new_het_lt,  # 客户端本地训练 / 异构长尾测试推理
+                    eval_clients_multilabel)                 # 多标签客户端评估
+from models.resnet import DPPFLResNet, ResNet50                       # 预训练 ResNet-50 骨干网络
+from utils import (get_dataset, average_weights, average_weights_fedbn,  # 数据集加载 / 普通加权平均 / FedBN 加权平均
+                   exp_details, proto_aggregation, agg_func)             # 实验详情打印 / 原型聚合 / 通用聚合函数
+from dp import (DPMechProto, DPMechWeight, MomentsAccountant,  # 原型差分隐私机制 / 权重差分隐私机制 / 矩会计隐私追踪
+                compute_noise_multiplier_from_epsilon)          # 由 epsilon 反推噪声乘数
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -34,6 +35,17 @@ from dp import (DPMechProto, DPMechWeight, MomentsAccountant,
 
 def FedProto_taskheter(args, train_dataset, test_dataset, user_groups,
                        user_groups_lt, local_model_list, classes_list):
+    """FedProto 联邦原型学习：本地分类损失 + 原型正则化损失 + 服务器端原型聚合
+
+    每轮流程：
+      1. 采样参与客户端 → 本地训练（BCE + 原型距离正则化）
+      2. 收集本地原型 → 服务器端聚合为全局原型
+      3. （可选）差分隐私扰动上传的原型
+
+    返回:
+        acc_list_l: 各客户端不使用全局原型的 per-label 准确率
+        acc_list_g: 各客户端使用全局原型分类的 per-label 准确率
+    """
     use_dist = getattr(args, 'use_distributional', False)
     use_dp = getattr(args, 'use_dp', False)
 
@@ -68,7 +80,7 @@ def FedProto_taskheter(args, train_dataset, test_dataset, user_groups,
         for idx in idxs_users:
             local_model = LocalUpdate(args=args, dataset=train_dataset,
                                       idxs=user_groups[idx])
-            w, loss, acc, protos = local_model.update_weights_het(
+            w, loss, acc, protos = local_model.update_weights_FedP(
                 args, idx, global_protos,
                 model=copy.deepcopy(local_model_list[idx]),
                 global_round=round)
@@ -144,7 +156,7 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
     ld_warmup = getattr(args, 'ld_warmup', 50)
     temperature = getattr(args, 'temperature', 1.0)
 
-    suffix = '_dis' if use_dis else ''
+    suffix = '_dis' if use_dis else '' #解耦模式后缀
     summary_writer = SummaryWriter(
         f'../tensorboard/chestxray_{args.alg}{suffix}_'
         f'{args.ways}w{args.shots}s{args.stdev}e_'
@@ -185,7 +197,7 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
         for idx in idxs_users:
             local_model = LocalUpdate(args=args, dataset=train_dataset,
                                       idxs=user_groups[idx])
-            w, loss, acc, protos = local_model.update_weights_het(
+            w, loss, acc, protos = local_model.update_weights_DPPFL(
                 args, idx, global_protos,
                 model=copy.deepcopy(local_model_list[idx]),
                 global_round=round)
@@ -266,6 +278,16 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
 
 def FedAvg_taskheter(args, train_dataset, test_dataset, user_groups,
                      user_groups_lt, local_model_list, _classes_list):
+    """FedAvg 联邦平均：本地 SGD 训练 + 服务器端参数等权平均
+
+    每轮流程：
+      1. 采样客户端 → 本地多 epoch SGD 训练
+      2. 收集本地模型权重 → 服务器等权平均
+      3. （可选）差分隐私（对权重 delta 裁剪+加噪）
+
+    返回:
+        acc_list: 各客户端 per-label 准确率列表
+    """
     use_dp = getattr(args, 'use_dp', False)
 
     summary_writer = SummaryWriter(
@@ -340,6 +362,18 @@ def FedAvg_taskheter(args, train_dataset, test_dataset, user_groups,
 
 def FedProx_taskheter(args, train_dataset, test_dataset, user_groups,
                       user_groups_lt, local_model_list, classes_list):
+    """FedProx 联邦近端优化：L = L_CE + (mu/2)*||w - w_global||^2
+
+    通过近端项约束本地更新不偏离全局模型太远，适合 Non-IID 场景。
+
+    每轮流程：
+      1. 采样客户端 → 带近端正则的本地训练
+      2. 收集本地模型 → 等权平均聚合
+      3. （可选）差分隐私（对权重 delta 裁剪+加噪）
+
+    返回:
+        acc_list: 各客户端 per-label 准确率列表
+    """
     use_dp = getattr(args, 'use_dp', False)
 
     summary_writer = SummaryWriter(
@@ -414,6 +448,20 @@ def FedProx_taskheter(args, train_dataset, test_dataset, user_groups,
 
 def FedBN_taskheter(args, train_dataset, test_dataset, user_groups,
                     user_groups_lt, local_model_list, classes_list):
+    """FedBN 联邦批归一化：聚合 CNN/FC 参数，保留客户端本地 BN 统计量
+
+    适合 Non-IID 特征分布差异场景（不同医院的成像风格不同）。
+    BN 层的 running_mean/var 和 gamma/beta 不参与聚合。
+
+    每轮流程：
+      1. 采样客户端 → 本地 SGD 训练
+      2. 收集本地模型 → 仅平均非 BN 层参数
+      3. 客户端恢复本地 BN 参数，未参与客户端保持不变
+      4. （可选）差分隐私（对权重 delta 裁剪+加噪）
+
+    返回:
+        acc_list: 各客户端 per-label 准确率列表
+    """
     use_dp = getattr(args, 'use_dp', False)
 
     summary_writer = SummaryWriter(
@@ -497,6 +545,19 @@ def FedBN_taskheter(args, train_dataset, test_dataset, user_groups,
 
 def SCAFFOLD_taskheter(args, train_dataset, test_dataset, user_groups,
                        user_groups_lt, local_model_list, classes_list):
+    """SCAFFOLD 联邦方差缩减：使用 control variate 修正客户端漂移
+
+    核心思路：维护全局和本地 control variate（c_global / c_local），
+    在本地训练时修正梯度以抵消 Non-IID 数据的漂移效应。
+
+    每轮流程：
+      1. 采样客户端 → 本地训练（梯度修正 g_corr = g - c_local + c_global）
+      2. 服务器聚合模型 → 更新 c_global = c_global + avg(c_delta)
+      3. （可选）差分隐私（对权重 delta 裁剪+加噪）
+
+    返回:
+        acc_list: 各客户端 per-label 准确率列表
+    """
     use_dp = getattr(args, 'use_dp', False)
 
     summary_writer = SummaryWriter(
@@ -614,10 +675,16 @@ if __name__ == '__main__':
 
     local_model_list = []
     for i in range(args.num_users):
-        local_model = DPPFLResNet(args=args)
-        local_model.to(args.device)
-        local_model.train()
-        local_model_list.append(local_model)
+        if args.alg == "dppfl":
+            local_model = DPPFLResNet(args=args)
+            local_model.to(args.device)
+            local_model.train()
+            local_model_list.append(local_model)
+        else:
+            local_model = ResNet50(args=args)
+            local_model.to(args.device)
+            local_model.train()
+            local_model_list.append(local_model)
 
     print(f'\n=== Running {args.alg.upper()} ===\n')
 

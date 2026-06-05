@@ -1,0 +1,872 @@
+meta:
+  theme: tech-blue
+  layout: horizontal
+  source: edited
+  title: DPP-FL Architecture
+modules: []
+nodes:
+  - id: ntitle
+    label: DPP-FL Framework Overview
+    type: service
+    position:
+      x: 648
+      'y': 24
+    size: xl
+    style:
+      fontSize: 16
+  - id: nclient-panel
+    label: nclient-panel
+    type: user
+    position:
+      x: 224
+      'y': 384
+    size: xl
+    style:
+      fillColor: '#F5F5F5'
+      strokeColor: '#333333'
+      strokeWidth: 1
+  - id: nclient-label
+    label: Client k (Hospital)
+    type: user
+    position:
+      x: 104
+      'y': 72
+    size: medium
+    style:
+      fontSize: 12
+  - id: nclient-multi-note
+    label: × K clients
+    type: user
+    position:
+      x: 344
+      'y': 72
+    size: medium
+    style:
+      fontColor: '#666666'
+      fontSize: 10
+  - id: ndata-box
+    label: Chest X-ray Images (Non-IID, Multi-Label)
+    type: service
+    position:
+      x: 224
+      'y': 112
+    size: xl
+    style:
+      fillColor: '#FFFFFF'
+      strokeColor: '#555555'
+      strokeWidth: 1
+      fontSize: 10
+  - id: nbackbone-box
+    label: ResNet-50 Backbone (Pretrained) Layer1-2 Frozen | Layer3-4 Fine-tuned
+    type: feature
+    position:
+      x: 224
+      'y': 176
+    size: xl
+    style:
+      fillColor: '#E8ECF0'
+      strokeColor: '#555555'
+      strokeWidth: 1
+      fontSize: 10
+  - id: nfc1-box
+    label: 'fc1: 2048 → 256 (ReLU)'
+    type: service
+    position:
+      x: 224
+      'y': 232
+    size: xl
+    style:
+      fillColor: '#FFFFFF'
+      strokeColor: '#555555'
+      strokeWidth: 1
+      fontSize: 10
+  - id: ndis-container
+    label: ndis-container
+    type: service
+    position:
+      x: 224
+      'y': 368
+    size: xl
+    style:
+      fillColor: '#F0F4E8'
+      strokeColor: '#558833'
+      strokeWidth: 1
+  - id: ndis-label
+    label: Prototype Disentanglement
+    type: service
+    position:
+      x: 136
+      'y': 280
+    size: large
+    style:
+      fontColor: '#336622'
+      fontSize: 10
+  - id: nzsem-box
+    label: z sem (192-dim, 75%) Disease-discriminative → Shared
+    type: service
+    position:
+      x: 136
+      'y': 320
+    size: large
+    style:
+      fillColor: '#D5E8D4'
+      strokeColor: '#558833'
+      strokeWidth: 1
+      fontSize: 10
+  - id: nzstyle-box
+    label: z style (64-dim, 25%) Imaging characteristics → Local
+    type: service
+    position:
+      x: 304
+      'y': 320
+    size: medium
+    style:
+      fillColor: '#E8D5D5'
+      strokeColor: '#883333'
+      strokeWidth: 1
+      fontSize: 10
+  - id: nprotohead-sem
+    label: ProbabilisticProtoHead μ sem , log σ² sem
+    type: document
+    position:
+      x: 136
+      'y': 384
+    size: large
+    style:
+      fillColor: '#FFFFFF'
+      strokeColor: '#558833'
+      strokeWidth: 1
+      fontSize: 9
+  - id: nprotohead-style
+    label: ProbabilisticProtoHead μ style , log σ² style
+    type: document
+    position:
+      x: 304
+      'y': 384
+    size: medium
+    style:
+      fillColor: '#FFFFFF'
+      strokeColor: '#883333'
+      strokeWidth: 1
+      fontSize: 9
+  - id: nhsic-box
+    label: L dis = ||Cov(z sem , z style )||² F HSIC Independence Constraint (computed locally)
+    type: formula
+    position:
+      x: 224
+      'y': 432
+    size: xl
+    style:
+      fillColor: '#FFF8E0'
+      strokeColor: '#AA8800'
+      strokeWidth: 1
+      fontSize: 9
+  - id: ncls-box
+    label: 'fc2 : Concat[z sem , z style ] → 14-dim logits'
+    type: document
+    position:
+      x: 224
+      'y': 488
+    size: xl
+    style:
+      fillColor: '#FFFFFF'
+      strokeColor: '#555555'
+      strokeWidth: 1
+      fontSize: 10
+  - id: nloss-box
+    label: 'Local Loss: L = L BCE + λ eff ·L proto sem + λ dis ·L dis'
+    type: loss
+    position:
+      x: 224
+      'y': 544
+    size: xl
+    style:
+      fillColor: '#FFFFFF'
+      strokeColor: '#555555'
+      strokeWidth: 1
+      fontSize: 9
+  - id: ndp-box
+    label: Differential Privacy (optional) L2 Clip(C) + N(0, σ²C²I) → (μ sem || logσ² sem )
+    type: document
+    position:
+      x: 224
+      'y': 600
+    size: xl
+    style:
+      fillColor: '#F0E0F0'
+      strokeColor: '#7733AA'
+      strokeWidth: 1
+      fontSize: 9
+  - id: nwithin-agg-box
+    label: Within-Client Aggregation μ_avg = mean(μ_i) σ²_avg = mean(σ²_i) + Var(μ_i)
+    type: user
+    position:
+      x: 224
+      'y': 664
+    size: xl
+    style:
+      fillColor: '#FFFFFF'
+      strokeColor: '#555555'
+      strokeWidth: 1
+      fontSize: 9
+  - id: ncomm-container
+    label: ncomm-container
+    type: service
+    position:
+      x: 512
+      'y': 384
+    size: large
+    style:
+      fillColor: '#F8F8FF'
+      strokeColor: '#6666AA'
+      strokeWidth: 1
+  - id: ncomm-label
+    label: Communication
+    type: service
+    position:
+      x: 512
+      'y': 64
+    size: medium
+    style:
+      fontColor: '#444488'
+      fontSize: 10
+  - id: nupload-label
+    label: Upload μ sem , log σ² sem (semantic only)
+    type: document
+    position:
+      x: 512
+      'y': 304
+    size: medium
+    style:
+      fontColor: '#336622'
+      fontSize: 9
+  - id: ndownload-label
+    label: Download Global prototypes G sem = {μ g , σ² g }
+    type: service
+    position:
+      x: 512
+      'y': 400
+    size: medium
+    style:
+      fontColor: '#334488'
+      fontSize: 9
+  - id: ncomm-cost
+    label: ~28 KB/round vs ~92 MB (weight) ~3000× reduction
+    type: service
+    position:
+      x: 512
+      'y': 600
+    size: medium
+    style:
+      fillColor: '#FFFFFF'
+      strokeColor: '#6666AA'
+      strokeWidth: 1
+      fontSize: 9
+  - id: nstyle-local-note
+    label: Style stays local z style never uploaded
+    type: service
+    position:
+      x: 512
+      'y': 480
+    size: medium
+    style:
+      fillColor: '#F5E0E0'
+      strokeColor: '#883333'
+      strokeWidth: 1
+      fontSize: 9
+  - id: nserver-panel
+    label: nserver-panel
+    type: server
+    position:
+      x: 824
+      'y': 384
+    size: xl
+    style:
+      fillColor: '#F5F5FA'
+      strokeColor: '#333366'
+      strokeWidth: 1
+  - id: nserver-label
+    label: Central Server
+    type: server
+    position:
+      x: 672
+      'y': 72
+    size: medium
+    style:
+      fontColor: '#222266'
+      fontSize: 12
+  - id: nreceive-box
+    label: Receive {μ sem (k) , σ² sem (k) } from K clients
+    type: user
+    position:
+      x: 824
+      'y': 104
+    size: xl
+    style:
+      fillColor: '#FFFFFF'
+      strokeColor: '#555555'
+      strokeWidth: 1
+      fontSize: 10
+  - id: nbayesian-box
+    label: nbayesian-box
+    type: service
+    position:
+      x: 824
+      'y': 216
+    size: xl
+    style:
+      fillColor: '#E8ECF8'
+      strokeColor: '#3333AA'
+      strokeWidth: 1
+  - id: nbayesian-label
+    label: Bayesian Fusion (Precision-Weighted)
+    type: service
+    position:
+      x: 768
+      'y': 160
+    size: xl
+    style:
+      fontColor: '#2222AA'
+      fontSize: 10
+  - id: nbayesian-formula
+    label: μ* = Σ k (μ k /σ² k ) / Σ k (1/σ² k ) σ²* = 1 / Σ k (1/σ² k )
+    type: service
+    position:
+      x: 824
+      'y': 200
+    size: xl
+    style:
+      fontSize: 10
+  - id: nbayesian-props
+    label: • Clients with lower variance → higher weight • Fused σ²* ≤ min_k σ²_k (uncertainty reduces)
+    type: user
+    position:
+      x: 824
+      'y': 248
+    size: xl
+    style:
+      fontColor: '#444488'
+      fontSize: 8
+  - id: nema-box
+    label: nema-box
+    type: service
+    position:
+      x: 824
+      'y': 344
+    size: xl
+    style:
+      fillColor: '#E8F0E8'
+      strokeColor: '#338833'
+      strokeWidth: 1
+  - id: nema-label
+    label: EMA Momentum
+    type: service
+    position:
+      x: 704
+      'y': 320
+    size: medium
+    style:
+      fontColor: '#226622'
+      fontSize: 10
+  - id: nema-formula
+    label: G t = β·G t-1 + (1-β)·G t new β = 0.9 (separate EMA on μ and log σ²)
+    type: formula
+    position:
+      x: 824
+      'y': 352
+    size: xl
+    style:
+      fontSize: 10
+  - id: nglobal-proto-box
+    label: nglobal-proto-box
+    type: service
+    position:
+      x: 824
+      'y': 456
+    size: xl
+    style:
+      fillColor: '#E0E0F0'
+      strokeColor: '#4444AA'
+      strokeWidth: 1
+  - id: nglobal-proto-label
+    label: Global Prototypes (per class c)
+    type: service
+    position:
+      x: 744
+      'y': 416
+    size: xl
+    style:
+      fontColor: '#222288'
+      fontSize: 10
+  - id: nglobal-proto-content
+    label: >-
+      G[c] = N(μ g,c , σ² g,c ) 14-class dictionary (ChestX-ray14) Semantic subspace only (192-dim) Updated each round
+      after EMA smoothing
+    type: formula
+    position:
+      x: 824
+      'y': 464
+    size: xl
+    style:
+      fontSize: 10
+  - id: nwarmup-box
+    label: nwarmup-box
+    type: service
+    position:
+      x: 824
+      'y': 568
+    size: xl
+    style:
+      fillColor: '#FFF0E0'
+      strokeColor: '#AA6633'
+      strokeWidth: 1
+  - id: nwarmup-label
+    label: Adaptive λ Warmup
+    type: service
+    position:
+      x: 712
+      'y': 544
+    size: medium
+    style:
+      fontColor: '#884422'
+      fontSize: 10
+  - id: nwarmup-formula
+    label: λ eff (t) = λ · min(1, (t+1)/W) W = 50 rounds (linear warmup from 0 to λ)
+    type: service
+    position:
+      x: 824
+      'y': 576
+    size: xl
+    style:
+      fontSize: 10
+  - id: nprivacy-acct-box
+    label: nprivacy-acct-box
+    type: service
+    position:
+      x: 824
+      'y': 656
+    size: xl
+    style:
+      fillColor: '#F0E0F0'
+      strokeColor: '#7733AA'
+      strokeWidth: 1
+  - id: nprivacy-acct-label
+    label: RDP Privacy Accounting (optional)
+    type: service
+    position:
+      x: 752
+      'y': 632
+    size: xl
+    style:
+      fontColor: '#662288'
+      fontSize: 10
+  - id: nprivacy-acct-formula
+    label: ε = min λ>1 [T·λ/(2σ²) - log δ/(λ-1)] Moments Accountant across T rounds
+    type: document
+    position:
+      x: 824
+      'y': 664
+    size: xl
+    style:
+      fontSize: 10
+  - id: ninference-panel
+    label: ninference-panel
+    type: service
+    position:
+      x: 528
+      'y': 808
+    size: xl
+    style:
+      fillColor: '#F8F8F0'
+      strokeColor: '#555555'
+      strokeWidth: 1
+  - id: ninference-label
+    label: Inference (Temperature-Scaled Prototype Classification)
+    type: service
+    position:
+      x: 224
+      'y': 752
+    size: xl
+    style:
+      fontSize: 11
+  - id: ninf-step1
+    label: 1. Extract Prototype p = fc1(ResNet50(x_test))
+    type: input
+    position:
+      x: 144
+      'y': 800
+    size: large
+    style:
+      fillColor: '#FFFFFF'
+      strokeColor: '#555555'
+      strokeWidth: 1
+      fontSize: 10
+  - id: ninf-step2
+    label: 2. Compute Distance dist(p, G[c]) = ½ Σ_j (p_j-μ_{g,j})²/σ²_{g,j} (Mahalanobis-like for distributional)
+    type: formula
+    position:
+      x: 416
+      'y': 800
+    size: xl
+    style:
+      fillColor: '#FFFFFF'
+      strokeColor: '#555555'
+      strokeWidth: 1
+      fontSize: 9
+  - id: ninf-step3
+    label: 3. Temperature Scaling logit_c(x) = -dist(p, G[c]) / T
+    type: document
+    position:
+      x: 704
+      'y': 800
+    size: xl
+    style:
+      fillColor: '#FFFFFF'
+      strokeColor: '#555555'
+      strokeWidth: 1
+      fontSize: 10
+  - id: ninf-step4
+    label: 4. Predict ŷ_c = σ(logit_c) > 0.5
+    type: document
+    position:
+      x: 928
+      'y': 800
+    size: large
+    style:
+      fillColor: '#FFFFFF'
+      strokeColor: '#555555'
+      strokeWidth: 1
+      fontSize: 10
+  - id: ntemp-note
+    label: 'T 1: softer (calibrated)'
+    type: service
+    position:
+      x: 808
+      'y': 832
+    size: xl
+    style:
+      fontColor: '#666666'
+      fontSize: 8
+  - id: narr-global-inf-label
+    label: G[c] lookup
+    type: embed
+    position:
+      x: 472
+      'y': 728
+    size: small
+    style:
+      fontColor: '#4444AA'
+      fontSize: 8
+  - id: nlegend-box
+    label: nlegend-box
+    type: terminal
+    position:
+      x: 1152
+      'y': 144
+    size: xl
+    style:
+      fillColor: '#FFFFFF'
+      strokeColor: '#999999'
+      strokeWidth: 1
+  - id: nlegend-title
+    label: Legend
+    type: terminal
+    position:
+      x: 1104
+      'y': 64
+    size: tiny
+    style:
+      fontSize: 10
+  - id: nlegend-sem
+    label: nlegend-sem
+    type: terminal
+    position:
+      x: 1088
+      'y': 96
+    size: tiny
+    style:
+      fillColor: '#D5E8D4'
+      strokeColor: '#558833'
+      strokeWidth: 1
+  - id: nlegend-sem-txt
+    label: Semantic (shared)
+    type: service
+    position:
+      x: 1176
+      'y': 96
+    size: medium
+    style:
+      fontSize: 8
+  - id: nlegend-style
+    label: nlegend-style
+    type: terminal
+    position:
+      x: 1088
+      'y': 112
+    size: tiny
+    style:
+      fillColor: '#E8D5D5'
+      strokeColor: '#883333'
+      strokeWidth: 1
+  - id: nlegend-style-txt
+    label: Style (local only)
+    type: service
+    position:
+      x: 1176
+      'y': 112
+    size: medium
+    style:
+      fontSize: 8
+  - id: nlegend-dp
+    label: nlegend-dp
+    type: terminal
+    position:
+      x: 1088
+      'y': 136
+    size: tiny
+    style:
+      fillColor: '#F0E0F0'
+      strokeColor: '#7733AA'
+      strokeWidth: 1
+  - id: nlegend-dp-txt
+    label: DP (optional)
+    type: service
+    position:
+      x: 1176
+      'y': 136
+    size: medium
+    style:
+      fontSize: 8
+  - id: nlegend-solid-txt
+    label: Data flow
+    type: service
+    position:
+      x: 1184
+      'y': 160
+    size: small
+    style:
+      fontSize: 8
+  - id: nlegend-dash-txt
+    label: Loss/Control
+    type: loss
+    position:
+      x: 1184
+      'y': 184
+    size: small
+    style:
+      fontSize: 8
+  - id: nlegend-bold-txt
+    label: Proto exchange
+    type: service
+    position:
+      x: 1184
+      'y': 200
+    size: small
+    style:
+      fontSize: 8
+edges:
+  - from: ndata-box
+    to: nbackbone-box
+    type: primary
+    style:
+      strokeColor: '#555555'
+      strokeWidth: 1
+      endArrow: classic
+  - from: nbackbone-box
+    to: nfc1-box
+    type: primary
+    style:
+      strokeColor: '#555555'
+      strokeWidth: 1
+      endArrow: classic
+  - from: nfc1-box
+    to: nzsem-box
+    type: primary
+    style:
+      strokeColor: '#558833'
+      strokeWidth: 1
+      endArrow: classic
+  - from: nfc1-box
+    to: nzstyle-box
+    type: primary
+    style:
+      strokeColor: '#883333'
+      strokeWidth: 1
+      endArrow: classic
+  - from: nzsem-box
+    to: nprotohead-sem
+    type: primary
+    style:
+      strokeColor: '#558833'
+      strokeWidth: 1
+      endArrow: classic
+  - from: nzstyle-box
+    to: nprotohead-style
+    type: primary
+    style:
+      strokeColor: '#883333'
+      strokeWidth: 1
+      endArrow: classic
+  - from: nprotohead-sem
+    to: ncls-box
+    type: primary
+    style:
+      strokeColor: '#555555'
+      strokeWidth: 1
+      endArrow: classic
+      exitX: 0.5
+      exitY: 1
+    waypoints:
+      - x: 138
+        'y': 468
+  - from: nprotohead-style
+    to: ncls-box
+    type: primary
+    style:
+      strokeColor: '#883333'
+      strokeWidth: 1
+      endArrow: classic
+    waypoints:
+      - x: 305
+        'y': 468
+  - from: ncls-box
+    to: nloss-box
+    type: primary
+    style:
+      strokeColor: '#555555'
+      strokeWidth: 1
+      endArrow: classic
+  - from: nhsic-box
+    to: nloss-box
+    type: data
+    style:
+      strokeColor: '#AA8800'
+      strokeWidth: 1
+      dashed: true
+      endArrow: classic
+  - from: nprotohead-sem
+    to: ndp-box
+    type: data
+    style:
+      strokeColor: '#7733AA'
+      strokeWidth: 1
+      dashed: true
+      endArrow: classic
+    waypoints:
+      - x: 50
+        'y': 600
+  - from: ndp-box
+    to: nwithin-agg-box
+    type: primary
+    style:
+      strokeColor: '#555555'
+      strokeWidth: 1
+      endArrow: classic
+  - from: nwithin-agg-box
+    to: nbayesian-box
+    type: primary
+    style:
+      strokeColor: '#336622'
+      strokeWidth: 2
+      endArrow: block
+      exitX: 1
+      exitY: 0.5
+      entryX: 0
+      entryY: 0.5
+    waypoints:
+      - x: 425
+        'y': 663
+      - x: 425
+        'y': 153
+  - from: nglobal-proto-box
+    to: nprotohead-sem
+    type: primary
+    style:
+      strokeColor: '#334488'
+      strokeWidth: 2
+      endArrow: block
+      endFill: false
+      exitX: 0
+      exitY: 0.5
+      entryX: 1
+      entryY: 0.5
+    waypoints:
+      - x: 575
+        'y': 275
+      - x: 575
+        'y': 380
+  - from: nreceive-box
+    to: nbayesian-box
+    type: primary
+    style:
+      strokeColor: '#3333AA'
+      strokeWidth: 1
+      endArrow: classic
+  - from: nbayesian-box
+    to: nema-box
+    type: primary
+    style:
+      strokeColor: '#338833'
+      strokeWidth: 1
+      endArrow: classic
+  - from: nema-box
+    to: nglobal-proto-box
+    type: primary
+    style:
+      strokeColor: '#4444AA'
+      strokeWidth: 1
+      endArrow: classic
+  - from: nglobal-proto-box
+    to: nwarmup-box
+    type: data
+    style:
+      strokeColor: '#AA6633'
+      strokeWidth: 1
+      dashed: true
+      endArrow: classic
+  - from: nwarmup-box
+    to: nprivacy-acct-box
+    type: data
+    style:
+      strokeColor: '#7733AA'
+      strokeWidth: 1
+      dashed: true
+      endArrow: classic
+  - from: ninf-step1
+    to: ninf-step2
+    type: primary
+    style:
+      strokeColor: '#555555'
+      strokeWidth: 1
+      endArrow: classic
+  - from: ninf-step2
+    to: ninf-step3
+    type: primary
+    style:
+      strokeColor: '#555555'
+      strokeWidth: 1
+      endArrow: classic
+  - from: ninf-step3
+    to: ninf-step4
+    type: primary
+    style:
+      strokeColor: '#555555'
+      strokeWidth: 1
+      endArrow: classic
+  - from: nglobal-proto-box
+    to: ninf-step2
+    type: data
+    style:
+      strokeColor: '#4444AA'
+      strokeWidth: 1
+      dashed: true
+      endArrow: classic
+      exitX: 0.5
+      exitY: 1
+      entryX: 0.5
+      entryY: 0
+    waypoints:
+      - x: 825
+        'y': 730
+      - x: 415
+        'y': 730

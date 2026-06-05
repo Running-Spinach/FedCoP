@@ -5,206 +5,6 @@ from torchvision import datasets, transforms
 import random
 
 
-def mnist_iid(dataset, num_users):
-    """
-    对MNIST数据集进行IID（独立同分布）采样
-
-    参数:
-        dataset: MNIST数据集对象
-        num_users: 客户端数量
-
-    返回:
-        dict_users: 字典，键为用户索引，值为该用户分配的数据索引集合
-    """
-    num_items = int(len(dataset) / num_users)
-    dict_users, all_idxs = {}, [i for i in range(len(dataset))]
-    for i in range(num_users):
-        dict_users[i] = set(np.random.choice(all_idxs, num_items,
-                                             replace=False))
-        all_idxs = list(set(all_idxs) - dict_users[i])
-    return dict_users
-
-
-def mnist_noniid(args, dataset, num_users, n_list, k_list):
-    """
-    对MNIST数据集进行Non-IID（非独立同分布）采样，每个客户端分配不同类别和数量的数据
-
-    参数:
-        args: 配置参数对象
-        dataset: MNIST数据集对象
-        num_users: 客户端数量
-        n_list: 每个客户端拥有的类别数量列表
-        k_list: 每个客户端每类拥有的样本数量列表
-
-    返回:
-        dict_users: 字典，键为用户索引，值为该用户的数据索引数组
-        classes_list: 每个用户拥有的类别列表
-    """
-    num_shards, num_imgs = 10, 6000
-    idx_shard = [i for i in range(num_shards)]
-    dict_users = {}
-    idxs = np.arange(num_shards * num_imgs)
-    labels = dataset.train_labels.numpy()
-
-    # 按标签排序
-    idxs_labels = np.vstack((idxs, labels))
-    idxs_labels = idxs_labels[:, idxs_labels[1, :].argsort()]
-    idxs = idxs_labels[0, :]
-    label_begin = {}  # 记录每个类别的起始索引
-    cnt = 0
-    for i in idxs_labels[1, :]:
-        if i not in label_begin:
-            label_begin[i] = cnt
-        cnt += 1
-
-    classes_list = []
-    for i in range(num_users):
-        n = n_list[i]
-        k = k_list[i]
-        k_len = args.train_shots_max
-        classes = random.sample(range(0, args.num_classes), n)  # 随机选择该用户拥有的类别
-        classes = np.sort(classes)
-        print("user {:d}: {:d}-way {:d}-shot".format(i + 1, n, k))
-        print("classes:", classes)
-        user_data = np.array([])
-        for each_class in classes:
-            begin = i * k_len + label_begin[each_class.item()]
-            user_data = np.concatenate((user_data, idxs[begin: begin + k]), axis=0)
-        dict_users[i] = user_data
-        classes_list.append(classes)
-
-    return dict_users, classes_list
-
-
-def mnist_noniid_lt(args, test_dataset, num_users, n_list, k_list, classes_list):
-    """
-    对MNIST测试集进行Non-IID本地测试数据采样
-
-    参数:
-        args: 配置参数对象
-        test_dataset: 测试数据集
-        num_users: 客户端数量
-        n_list: 每个客户端的类别数量列表
-        k_list: 每个客户端每类的样本数量列表
-        classes_list: 每个客户端训练时的类别列表
-
-    返回:
-        dict_users: 字典，键为用户索引，值为该用户的本地测试数据索引数组
-    """
-    num_shards, num_imgs = 10, 1000
-    idx_shard = [i for i in range(num_shards)]
-    dict_users = {}
-    idxs = np.arange(num_shards * num_imgs)
-    labels = test_dataset.train_labels.numpy()
-
-    # 按标签排序
-    idxs_labels = np.vstack((idxs, labels))
-    idxs_labels = idxs_labels[:, idxs_labels[1, :].argsort()]
-    idxs = idxs_labels[0, :]
-    label_begin = {}
-    cnt = 0
-    for i in idxs_labels[1, :]:
-        if i not in label_begin:
-            label_begin[i] = cnt
-        cnt += 1
-
-    for i in range(num_users):
-        k = 40  # 每个类别选择的测试样本数
-        classes = classes_list[i]
-        print("local test classes:", classes)
-        user_data = np.array([])
-        for each_class in classes:
-            begin = i * 40 + label_begin[each_class.item()]
-            user_data = np.concatenate((user_data, idxs[begin: begin + k]), axis=0)
-        dict_users[i] = user_data
-
-    return dict_users
-
-
-def mnist_noniid_unequal(dataset, num_users):
-    """
-    对MNIST数据集进行Non-IID不等量划分，各客户端数据量不均衡
-
-    参数:
-        dataset: MNIST数据集对象
-        num_users: 客户端数量
-
-    返回:
-        dict_users: 字典，键为用户索引，值为该用户的数据索引数组
-    """
-    num_shards, num_imgs = 1200, 50
-    idx_shard = [i for i in range(num_shards)]
-    dict_users = {i: np.array([]) for i in range(num_users)}
-    idxs = np.arange(num_shards * num_imgs)
-    labels = dataset.train_labels.numpy()
-
-    # 按标签排序
-    idxs_labels = np.vstack((idxs, labels))
-    idxs_labels = idxs_labels[:, idxs_labels[1, :].argsort()]
-    idxs = idxs_labels[0, :]
-
-    # 每个客户端分配的数据分片数范围
-    min_shard = 1
-    max_shard = 30
-
-    # 随机分配不等量的分片给每个客户端
-    random_shard_size = np.random.randint(min_shard, max_shard + 1,
-                                          size=num_users)
-    random_shard_size = np.around(random_shard_size /
-                                  sum(random_shard_size) * num_shards)
-    random_shard_size = random_shard_size.astype(int)
-
-    if sum(random_shard_size) > num_shards:
-        for i in range(num_users):
-            # 先为每个客户端分配1个分片，确保每个客户端至少有数据
-            rand_set = set(np.random.choice(idx_shard, 1, replace=False))
-            idx_shard = list(set(idx_shard) - rand_set)
-            for rand in rand_set:
-                dict_users[i] = np.concatenate(
-                    (dict_users[i], idxs[rand * num_imgs:(rand + 1) * num_imgs]),
-                    axis=0)
-
-        random_shard_size = random_shard_size - 1
-
-        # 再随机分配剩余分片
-        for i in range(num_users):
-            if len(idx_shard) == 0:
-                continue
-            shard_size = random_shard_size[i]
-            if shard_size > len(idx_shard):
-                shard_size = len(idx_shard)
-            rand_set = set(np.random.choice(idx_shard, shard_size,
-                                            replace=False))
-            idx_shard = list(set(idx_shard) - rand_set)
-            for rand in rand_set:
-                dict_users[i] = np.concatenate(
-                    (dict_users[i], idxs[rand * num_imgs:(rand + 1) * num_imgs]),
-                    axis=0)
-    else:
-        for i in range(num_users):
-            shard_size = random_shard_size[i]
-            rand_set = set(np.random.choice(idx_shard, shard_size,
-                                            replace=False))
-            idx_shard = list(set(idx_shard) - rand_set)
-            for rand in rand_set:
-                dict_users[i] = np.concatenate(
-                    (dict_users[i], idxs[rand * num_imgs:(rand + 1) * num_imgs]),
-                    axis=0)
-
-        if len(idx_shard) > 0:
-            # 将剩余分片分配给数据量最少的客户端
-            shard_size = len(idx_shard)
-            k = min(dict_users, key=lambda x: len(dict_users.get(x)))
-            rand_set = set(np.random.choice(idx_shard, shard_size,
-                                            replace=False))
-            for rand in rand_set:
-                dict_users[k] = np.concatenate(
-                    (dict_users[k], idxs[rand * num_imgs:(rand + 1) * num_imgs]),
-                    axis=0)
-
-    return dict_users
-
-
 def chestxray_noniid(args, dataset, num_users, n_list, k_list):
     """对 ChestX-ray14 进行 Non-IID 划分，按主标签（首个阳性疾病）分组
 
@@ -266,7 +66,7 @@ def chestxray_noniid(args, dataset, num_users, n_list, k_list):
             nf_chosen = np.random.choice(nf_samples, nf_per_client, replace=False)
             user_data.extend(nf_chosen.tolist())
 
-        dict_users[i] = np.array(list(set(user_data)))
+        dict_users[i] = np.array(list(set(user_data)))#去重打乱
         classes_list.append(classes)
 
     return dict_users, classes_list
@@ -312,7 +112,15 @@ def chestxray_noniid_lt(args, test_dataset, num_users, n_list, k_list, classes_l
 
 
 def chestxray_iid(dataset, num_users):
-    """对 ChestX-ray14 进行 IID 随机均匀划分"""
+    """对 ChestX-ray14 进行 IID 随机均匀划分
+
+    参数:
+        dataset: ChestX-ray14 数据集对象
+        num_users: 客户端数量
+
+    返回:
+        dict_users: 字典 {client_idx: set of data indices}
+    """
     num_items = int(len(dataset) / num_users)
     dict_users = {}
     all_idxs = list(range(len(dataset)))
@@ -331,3 +139,4 @@ if __name__ == '__main__':
                                    ]))
     num = 100
     d = mnist_noniid(dataset_train, num)
+    print(d)

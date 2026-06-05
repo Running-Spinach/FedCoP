@@ -44,6 +44,9 @@ def args_parser():
     # 其他参数
     parser.add_argument('--image_size', type=int, default=224,
                         help="输入图像尺寸（ChestX-ray14: 224）")
+    
+    parser.add_argument('--dataset', type=str, default='chestxray14', help="数据集名称")
+
     parser.add_argument('--data_dir', type=str, default='./data/', help="数据集根目录")
     parser.add_argument('--num_classes', type=int, default=14, help="类别数量（ChestX-ray14: 14种疾病）")
     parser.add_argument('--gpu', default=0, help="GPU设备ID，默认使用CPU")
