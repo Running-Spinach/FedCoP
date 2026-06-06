@@ -164,7 +164,7 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
     )
 
     if use_dis:
-        sem_dim = int(getattr(args, 'proto_dim', 256) * getattr(args, 'sem_ratio', 0.75))
+        sem_dim = int(getattr(args, 'proto_dim', 256) * getattr(args, 'sem_ratio', 0.75))#sem_ratio = 标准误 / 均值（SEM/Mean）
         print(f'Prototype Disentanglement ENABLED: sem_dim={sem_dim}, dis_lambda={dis_lambda}')
 
     global_protos = []

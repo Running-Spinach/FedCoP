@@ -17,7 +17,7 @@ def args_parser():
                         help="全局训练轮数")
     parser.add_argument('--num_users', type=int, default=20,
                         help="客户端数量: K")
-    parser.add_argument('--frac', type=float, default=0.04,
+    parser.add_argument('--frac', type=float, default=0.25,
                         help='每轮参与的客户端比例: C')
     parser.add_argument('--train_ep', type=int, default=1,
                         help="本地训练轮数: E")
