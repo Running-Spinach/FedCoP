@@ -1,7 +1,6 @@
 # 功能：联邦学习数据采样模块，支持IID/Non-IID数据划分
 
 import numpy as np
-from torchvision import datasets, transforms
 import random
 
 
@@ -128,15 +127,3 @@ def chestxray_iid(dataset, num_users):
         dict_users[i] = set(np.random.choice(all_idxs, num_items, replace=False))
         all_idxs = list(set(all_idxs) - dict_users[i])
     return dict_users
-
-
-if __name__ == '__main__':
-    dataset_train = datasets.MNIST('./data/mnist/', train=True, download=True,
-                                   transform=transforms.Compose([
-                                       transforms.ToTensor(),
-                                       transforms.Normalize((0.1307,),
-                                                            (0.3081,))
-                                   ]))
-    num = 100
-    d = mnist_noniid(dataset_train, num)
-    print(d)

@@ -3,8 +3,7 @@
 import copy
 import numpy as np
 import torch
-from torchvision import datasets, transforms
-from sampling import mnist_iid, mnist_noniid, mnist_noniid_unequal, mnist_noniid_lt
+from torchvision import transforms
 from sampling import chestxray_iid, chestxray_noniid, chestxray_noniid_lt
 import sys
 from pathlib import Path
@@ -57,75 +56,49 @@ def get_dataset(args, n_list, k_list):
         classes_list: 每个客户端的类别列表
         classes_list_gt: 用于测试的客户端类别列表
     """
-    if args.dataset == 'chestxray14':
-        # ── ChestX-ray14: 多标签数据集 ──
-        data_dir = args.data_dir + 'chestxray'
-        image_size = getattr(args, 'image_size', 224)
+    if args.dataset != 'chestxray14':
+        raise ValueError(f"Unsupported dataset: {args.dataset}. Only 'chestxray14' is supported.")
 
-        train_transform = transforms.Compose([
-            transforms.Grayscale(3),#3通道灰度图
-            transforms.Resize((image_size, image_size)),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225]),
-        ])
-        test_transform = transforms.Compose([
-            transforms.Grayscale(3),
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225]),
-        ])
+    # ── ChestX-ray14: 多标签数据集 ──
+    data_dir = args.data_dir + 'chestxray'
+    image_size = getattr(args, 'image_size', 224)
 
-        full_dataset = ChestXray14(data_dir, transform=None, image_size=image_size)
-        n_total = len(full_dataset)
-        n_train = int(0.8 * n_total)
-        idxs = np.random.RandomState(args.seed).permutation(n_total)
-        train_idxs, test_idxs = idxs[:n_train], idxs[n_train:]
+    train_transform = transforms.Compose([
+        transforms.Grayscale(3),#3通道灰度图
+        transforms.Resize((image_size, image_size)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
+    ])
+    test_transform = transforms.Compose([
+        transforms.Grayscale(3),
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
+    ])
 
-        train_dataset = TransformedSubset(full_dataset, train_idxs, train_transform)
-        test_dataset = TransformedSubset(full_dataset, test_idxs, test_transform)
+    full_dataset = ChestXray14(data_dir, transform=None, image_size=image_size)
+    n_total = len(full_dataset)
+    n_train = int(0.8 * n_total)
+    idxs = np.random.RandomState(args.seed).permutation(n_total)
+    train_idxs, test_idxs = idxs[:n_train], idxs[n_train:]
 
-        if args.iid:
-            user_groups = chestxray_iid(train_dataset, args.num_users)
-            user_groups_lt = None
-            classes_list = None
-            classes_list_gt = None
-        else:
-            user_groups, classes_list = chestxray_noniid(
-                args, train_dataset, args.num_users, n_list, k_list)
-            user_groups_lt = chestxray_noniid_lt(
-                args, test_dataset, args.num_users, n_list, k_list, classes_list)
-            classes_list_gt = classes_list
+    train_dataset = TransformedSubset(full_dataset, train_idxs, train_transform)
+    test_dataset = TransformedSubset(full_dataset, test_idxs, test_transform)
 
+    if args.iid:
+        user_groups = chestxray_iid(train_dataset, args.num_users)
+        user_groups_lt = None
+        classes_list = None
+        classes_list_gt = None
     else:
-        # ── MNIST: 单标签数据集 ──
-        data_dir = args.data_dir + 'mnist'
-
-        apply_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,))])
-
-        train_dataset = datasets.MNIST(data_dir, train=True, download=True,
-                                       transform=apply_transform)
-        test_dataset = datasets.MNIST(data_dir, train=False, download=True,
-                                      transform=apply_transform)
-
-        if args.iid:
-            user_groups = mnist_iid(train_dataset, args.num_users)
-            user_groups_lt = None
-            classes_list = None
-            classes_list_gt = None
-        elif args.unequal:
-            user_groups = mnist_noniid_unequal(args, train_dataset, args.num_users)
-            user_groups_lt = None
-            classes_list = None
-            classes_list_gt = None
-        else:
-            user_groups, classes_list = mnist_noniid(args, train_dataset, args.num_users, n_list, k_list)
-            user_groups_lt = mnist_noniid_lt(args, test_dataset, args.num_users, n_list, k_list, classes_list)
-            classes_list_gt = classes_list
+        user_groups, classes_list = chestxray_noniid(
+            args, train_dataset, args.num_users, n_list, k_list)
+        user_groups_lt = chestxray_noniid_lt(
+            args, test_dataset, args.num_users, n_list, k_list, classes_list)
+        classes_list_gt = classes_list
 
     return train_dataset, test_dataset, user_groups, user_groups_lt, classes_list, classes_list_gt
 

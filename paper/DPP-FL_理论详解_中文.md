@@ -642,3 +642,154 @@ KL 散度是**不对称**的：$\text{KL}(q\|p) \neq \text{KL}(p\|q)$。我们�
 | `--ways` | 3 | 每客户端平均类别数 |
 | `--shots` | 100 | 每类平均样本数 |
 | `--proto_dim` | 256 | 原型向量维度 |
+
+---
+
+## 15. 模型架构
+
+### 预训练 ResNet-50 Backbone (所有算法共用)
+
+所有算法统一使用 `DPPFLResNet`：ImageNet 预训练 ResNet-50 + 原型头 + 分类头。
+
+```
+Input (3, 224, 224)  ← 灰度X光片经 Grayscale(3) 转3通道
+  → stem: conv1 (7×7) → BN → ReLU → MaxPool  ← ImageNet 预训练权重
+  → layer1: 3× Bottleneck(64→256)    ← 冻结
+  → layer2: 4× Bottleneck(256→512)   ← 冻结
+  → layer3: 6× Bottleneck(512→1024)  ← 微调
+  → layer4: 3× Bottleneck(1024→2048) ← 微调
+  → AdaptiveAvgPool2d(1) → Flatten → (2048-dim)
+  → fc1 (2048 → proto_dim=256) → ReLU  ← 原型特征
+  → [ProbabilisticProtoHead]  ← (可选) 分布原型
+  → fc2 (256 → 14)  ← 多标签 logits
+```
+
+Bottleneck expansion=4，总参数量约 23M。冻结浅层 (layer1-2)、微调深层 (layer3-4) 的策略兼顾了预训练知识保留和医疗影像域适应。
+
+---
+
+## 16. 系统架构
+
+```
+DPP-FL/
+├── exps/
+│   └── federated_main.py          ← 主入口
+├── lib/
+│   ├── options.py                 ← 参数解析
+│   ├── utils.py                   ← 数据加载、权重聚合、原型聚合
+│   ├── update.py                  ← 本地训练、测试、多标签原型提取
+│   ├── sampling.py                ← IID/Non-IID 数据划分
+│   ├── chestxray.py               ← ChestX-ray14 数据集类
+│   ├── visualize.py               ← t-SNE 原型可视化
+│   ├── models/
+│   │   └── resnet.py              ← DPPFLResNet / ResNet50 backbone
+│   ├── dist_proto/                ← 分布原型子模块
+│   │   ├── proto_head.py          ← ProbabilisticProtoHead (μ, logvar)
+│   │   ├── losses.py              ← KL, Wasserstein, MSE 损失
+│   │   ├── aggregation.py         ← 贝叶斯融合
+│   │   └── disentangle.py         ← 解耦原型头 + HSIC 损失
+│   └── dp/                        ← 差分隐私子模块
+│       └── mechanisms.py          ← DPMechProto, MomentsAccountant
+├── figures/                       ← 架构图
+├── paper/                         ← 论文与理论文档
+├── scripts/
+│   └── run.sh                     ← 启动脚本
+└── requirements.txt
+```
+
+### 主训练循环调用关系
+
+```
+federated_main.py
+  │
+  ├─ args_parser()             → 解析命令行参数
+  ├─ get_dataset()             → 加载 + 划分数据
+  │   ├─ ChestXray14()         → 读取 Data_Entry_2017.csv + PNG 图片
+  │   └─ sampling.chestxray_noniid() → 多标签 Non-IID 划分
+  │
+  ├─ 构建 local_model_list[]   → 每个客户端一个 ResNet50
+  │
+  └─ FedProto_taskheter() / DPPFL_taskheter()  → 主训练循环
+      │
+      For each round:
+        ├─ 采样 m = frac * K 个客户端
+        For each selected client:
+          ├─ LocalUpdate.update_weights_het()
+          │   ├─ model → (logits, protos) 或 (logits, mu, logvar)
+          │   ├─ loss = BCE + λ * proto_loss
+          │   └─ agg_func() → 多标签原型取平均/合并方差
+          │
+          ├─ DPMechProto.clip_and_noise() → (可选) DP 扰动
+          │
+        ├─ proto_aggregation() → 跨客户端原型聚合
+        │   └─ bayesian_fusion_single_label() → (可选) 分布原型贝叶斯融合
+        │
+        └─ 将本轮训练权重写回 local_model_list
+
+      test_inference_new_het_lt_DPPFL()
+        ├─ 不使用全局原型: sigmoid(logits) > 0.5  (per-label)
+        └─ 使用全局原型: 负原型距离 → sigmoid → 二值预测 (per-label)
+```
+
+---
+
+## 17. 实现细节与注意事项
+
+### 17.1 原型格式统一
+
+全局原型字典 `global_protos` 的 value 格式：
+- **点原型**: 单一张量 `tensor(shape=[proto_dim])`
+- **分布原型**: 二元组 `(mu: tensor, logvar: tensor)`，各自 shape=[proto_dim]
+
+### 17.2 客户端采样
+
+`--frac` 参数控制每轮参与训练的客户端比例。每轮随机采样 `m = max(1, int(frac * K))` 个客户端。未参与轮的客户端保留上一轮模型，在后续轮次可被选中继续训练。
+
+### 17.3 多标签原型损失计算
+
+原型正则化损失 `L_proto` 的计算方式（以点原型为例）：
+
+```
+对 batch 中每张图 i:
+  对每个正标签 j (labels[i, j] == 1):
+    loss2 += MSE(proto_i, global_protos[j])
+loss2 = loss2 / count  # 除以所有正标签总数
+```
+
+即平均到每个正标签上，而非每张图。这意味着有多个疾病的 X 光片对原型损失的贡献更大。
+
+### 17.4 "No Finding" 负样本处理
+
+"No Finding"（标签全为 0）的样本在 Non-IID 划分时均匀分配给所有客户端（每个客户端至少 10 张），作为负样本参与训练，确保每个客户端都能学到"正常"的表示。
+
+### 17.5 分布原型的数值稳定性
+
+- `logvar` 被 clamp 到 [-10, 10] 范围（`ProbabilisticProtoHead`）
+- `var = exp(logvar)`，对应方差范围约 [4.5e-5, 2.2e4]
+- `agg_func` 中 `logvar_avg = log(avg_var + 1e-8)` 防止 log(0)
+- 推理时 `g_var + 1e-8` 防止除零
+
+---
+
+## 附录 B：数学符号汇总
+
+| 符号 | 含义 |
+|------|------|
+| K | 客户端总数 |
+| N_k | 客户端 k 的样本数 |
+| C | 总类别数 (ChestX-ray14: 14) |
+| c_k | 客户端 k 拥有的类别集合 |
+| f_k | 客户端 k 的本地模型 (ResNet-50) |
+| p_k^(i) | 客户端 k 中样本 i 的原型向量 |
+| P_k^(j) | 客户端 k 中类别 j 的聚合原型 |
+| G^(j) | 类别 j 的全局原型 |
+| L_BCE | 二值交叉熵多标签分类损失 |
+| L_proto | 原型距离损失 |
+| λ | 原型损失权重 (`--ld`) |
+| μ, σ² | 高斯分布原型的均值和方差 |
+| ε, δ | 差分隐私参数 |
+| z_sem | 语义原型向量 (共享) |
+| z_style | 风格原型向量 (本地) |
+| L_dis | 解耦独立性损失 (HSIC) |
+| λ_dis | 解耦损失权重 (`--dis_lambda`) |
+| y^(i) | 样本 i 的 14 维多标签二值向量 |

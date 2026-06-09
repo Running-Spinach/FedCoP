@@ -62,28 +62,30 @@ The `--data_dir` flag controls the root data directory (default: `../data/`).
 ```
 DPP-FL/
 ├── exps/
-│   └── federated_main.py         # Main entry point
+│   └── federated_main.py          # Main entry point
 ├── lib/
-│   ├── options.py                # Argument parsing
-│   ├── utils.py                  # Data loading, prototype aggregation
-│   ├── update.py                 # Local training, test inference
-│   ├── sampling.py               # IID/Non-IID data partitioning
-│   ├── chestxray.py              # ChestXray14 dataset class
-│   ├── visualize.py              # t-SNE prototype visualization
+│   ├── options.py                 # Argument parsing
+│   ├── utils.py                   # Data loading, prototype aggregation
+│   ├── update.py                  # Local training, test inference
+│   ├── sampling.py                # IID/Non-IID data partitioning
+│   ├── chestxray.py               # ChestXray14 dataset class
+│   ├── visualize.py               # t-SNE prototype visualization
 │   ├── models/
-│   │   ├── models.py             # CNNMnist (for MNIST)
-│   │   └── resnet.py             # ResNet50 backbone
+│   │   └── resnet.py              # DPPFLResNet / ResNet50 backbone
 │   ├── dist_proto/
-│   │   ├── proto_head.py         # ProbabilisticProtoHead (mu, logvar)
-│   │   ├── losses.py             # KL / Wasserstein / MSE distances
-│   │   └── aggregation.py        # Bayesian precision-weighted fusion
+│   │   ├── proto_head.py          # ProbabilisticProtoHead (mu, logvar)
+│   │   ├── losses.py              # KL / Wasserstein / MSE distances
+│   │   ├── aggregation.py         # Bayesian precision-weighted fusion
+│   │   └── disentangle.py         # DisentangledProtoHead + HSIC loss
 │   └── dp/
-│       └── mechanisms.py         # DPMechProto, MomentsAccountant
+│       ├── mechanisms.py          # DPMechProto, MomentsAccountant
+│       └── __init__.py            # DP module exports
+├── figures/                       # Architecture diagrams
+├── paper/                         # Paper & theory documentation
 ├── scripts/
-│   └── run.sh                    # Example launch script
+│   └── run.sh                     # Launch script (6 algorithms)
 ├── requirements.txt
-├── README.md
-└── THEORY.md                     # Detailed theory & algorithm docs (Chinese)
+└── README.md
 ```
 
 ## Running
@@ -148,13 +150,6 @@ python exps/federated_main.py --alg dppfl \
     --ways 5 --num_users 20 --rounds 100
 ```
 
-### Quick test (MNIST, IID)
-```bash
-python exps/federated_main.py --alg fedavg \
-    --model cnn --num_classes 10 --iid 1 \
-    --rounds 50 --num_users 10
-```
-
 ## Options
 
 ### Algorithm Selection
@@ -178,7 +173,7 @@ python exps/federated_main.py --alg fedavg \
 ### Model
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--model` | resnet50 | Backbone: resnet50 / cnn |
+| `--model` | resnet50 | Backbone: resnet50 |
 | `--num_classes` | 14 | Number of classes |
 | `--proto_dim` | 256 | Prototype vector dimension |
 | `--image_size` | 224 | Input image size |
