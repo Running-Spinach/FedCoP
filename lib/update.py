@@ -142,8 +142,9 @@ class LocalUpdate(object):
 
         return model.state_dict(), sum(epoch_loss) / len(epoch_loss), acc_val.item()
 
-    def update_weights_FedP(self, args, idx, global_protos, model, global_round=round):
-        
+    def update_weights_FedP(self, args, idx, global_protos, model, global_round=round, ld=None):
+        if ld is None:
+            ld = args.ld
         model.train()
         epoch_loss = {'total':[],'1':[], '2':[], '3':[]}
 
@@ -181,7 +182,7 @@ class LocalUpdate(object):
                                 count += 1
                     loss2 = loss2 / max(count, 1)
 
-                loss = loss1 + loss2 * args.ld
+                loss = loss1 + loss2 * ld
                 loss.backward()
                 optimizer.step()
 
@@ -336,7 +337,9 @@ class LocalUpdate(object):
 
         return model.state_dict(), avg_loss, acc_val.item(), c_local_new, c_delta
 
-    def update_weights_DPPFL(self, args, idx, global_protos, model, global_round=round):
+    def update_weights_DPPFL(self, args, idx, global_protos, model, global_round=round, ld=None):
+        if ld is None:
+            ld = args.ld
         """
         DPP-FL: 仅共享语义原型，风格原型保留本地
 
@@ -468,7 +471,7 @@ class LocalUpdate(object):
                                     count += 1
                         loss2 = loss2 / max(count, 1)
 
-                loss = loss1 + loss2 * args.ld + loss3 * dis_lambda
+                loss = loss1 + loss2 * ld + loss3 * dis_lambda
                 loss.backward()
                 optimizer.step()
 

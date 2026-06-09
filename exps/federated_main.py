@@ -83,7 +83,7 @@ def FedProto_taskheter(args, train_dataset, test_dataset, user_groups,
             w, loss, acc, protos = local_model.update_weights_FedP(
                 args, idx, global_protos,
                 model=copy.deepcopy(local_model_list[idx]),
-                global_round=round)
+                global_round=round, ld=args.ld)
 
             agg_protos = agg_func(protos, use_distributional=use_dist)
             local_weights.append(copy.deepcopy(w))
@@ -148,12 +148,12 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
          - 语义原型更纯净 → 跨客户端聚合噪声更小
          - 同等 DP budget 下信噪比更高 → 隐私-效用 tradeoff 更优
     """
-    use_dist = getattr(args, 'use_distributional', False)
+    use_dist = getattr(args, 'use_distributional', True)#是否使用分布原型（高斯分布参数）代替点原型
     use_dp = getattr(args, 'use_dp', False)
-    use_dis = getattr(args, 'use_disentangle', False)
-    dis_lambda = getattr(args, 'dis_lambda', 0.05)
+    use_dis = getattr(args, 'use_disentangle', True)#是否启用原型解耦 (语义-风格分离)
+    dis_lambda = getattr(args, 'dis_lambda', 0.05)#
     proto_momentum = getattr(args, 'proto_momentum', 0.9)
-    ld_warmup = getattr(args, 'ld_warmup', 50)
+    ld_warmup = getattr(args, 'ld_warmup', 50)#原型损失权重 warmup 轮数
     temperature = getattr(args, 'temperature', 1.0)
 
     suffix = '_dis' if use_dis else '' #解耦模式后缀
@@ -168,7 +168,7 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
         print(f'Prototype Disentanglement ENABLED: sem_dim={sem_dim}, dis_lambda={dis_lambda}')
 
     global_protos = []
-    global_protos_ema = {}                                    # EMA 积累的原型
+    global_protos_ema = {}                                    # EMA 积累的原型 (解耦模式下仅语义原型，分布式模式下为 (mu, logvar))
     train_loss = []
     m = max(1, int(args.frac * args.num_users))
 
@@ -194,13 +194,13 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
         # ── 自适应原型损失权重 warmup ──
         ld = args.ld * min(1.0, (round + 1) / max(ld_warmup, 1))
 
-        for idx in idxs_users:
+        for idx in idxs_users:#每轮随机选择部分客户端参与训练
             local_model = LocalUpdate(args=args, dataset=train_dataset,
                                       idxs=user_groups[idx])
             w, loss, acc, protos = local_model.update_weights_DPPFL(
                 args, idx, global_protos,
                 model=copy.deepcopy(local_model_list[idx]),
-                global_round=round)
+                global_round=round, ld=ld)
 
             agg_protos = agg_func(protos, use_distributional=use_dist)
             local_weights.append(copy.deepcopy(w))
