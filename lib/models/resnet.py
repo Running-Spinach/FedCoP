@@ -292,7 +292,7 @@ class DPPFLResNet(nn.Module):
             else:
                 _z_full, z_sem, z_style = self.dis_head(proto_features)
                 logits = self.fc2(proto_features)
-                return logits, z_sem, z_style
+                return logits, z_sem, z_style#原始分数 logits 仍基于全维度 proto_features 计算，z_sem/z_style 仅供原型聚合和损失计算使用。
         else:
             # 原始模式
             logits = self.fc2(proto_features)

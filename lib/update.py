@@ -120,14 +120,14 @@ class LocalUpdate(object):
 
                 model.zero_grad()
                 output = model(images)
-                log_probs = output[0] if isinstance(output, tuple) else output
-                loss = self.criterion(log_probs, labels)
+                logits = output[0] if isinstance(output, tuple) else output
+                loss = self.criterion(logits, labels)
 
                 loss.backward()
                 optimizer.step()
 
                 # 多标签 per-label 准确率
-                preds = (torch.sigmoid(log_probs) > 0.5).float()
+                preds = (torch.sigmoid(logits) > 0.5).float()
                 acc_val = (preds == labels).float().mean()
 
                 if self.args.verbose and (batch_idx % 10 == 0):
@@ -164,8 +164,8 @@ class LocalUpdate(object):
 
                 # loss1: cross-entrophy loss, loss2: proto distance loss
                 model.zero_grad()
-                log_probs, protos = model(images)
-                loss1 = self.criterion(log_probs, labels)
+                logits, protos = model(images)
+                loss1 = self.criterion(logits, labels)
 
                 loss_mse = nn.MSELoss()
                 if len(global_protos) == 0:
@@ -197,7 +197,7 @@ class LocalUpdate(object):
                                 agg_protos_label[lbl_idx] = [proto_val]
 
                 # 多标签 per-label 准确率
-                preds = (torch.sigmoid(log_probs) > 0.5).float()
+                preds = (torch.sigmoid(logits) > 0.5).float()
                 acc_val = (preds == labels).float().mean()
 
                 if self.args.verbose and (batch_idx % 10 == 0):
@@ -245,8 +245,8 @@ class LocalUpdate(object):
 
                 model.zero_grad()
                 output = model(images)
-                log_probs = output[0] if isinstance(output, tuple) else output
-                loss_ce = self.criterion(log_probs, labels)
+                logits = output[0] if isinstance(output, tuple) else output
+                loss_ce = self.criterion(logits, labels)
 
                 # FedProx 近端项：L2 距离（仅对可训练参数）
                 prox_term = 0.0
@@ -259,7 +259,7 @@ class LocalUpdate(object):
                 loss.backward()
                 optimizer.step()
 
-                preds = (torch.sigmoid(log_probs) > 0.5).float()
+                preds = (torch.sigmoid(logits) > 0.5).float()
                 acc_val = (preds == labels).float().mean()
 
                 if self.args.verbose and (batch_idx % 10 == 0):
@@ -301,8 +301,8 @@ class LocalUpdate(object):
 
                 model.zero_grad()
                 output = model(images)
-                log_probs = output[0] if isinstance(output, tuple) else output
-                loss = self.criterion(log_probs, labels)
+                logits = output[0] if isinstance(output, tuple) else output
+                loss = self.criterion(logits, labels)
                 loss.backward()
 
                 # SCAFFOLD 梯度修正 + 参数更新
@@ -315,7 +315,7 @@ class LocalUpdate(object):
                 optimizer.step()
                 total_steps += 1
 
-                preds = (torch.sigmoid(log_probs) > 0.5).float()
+                preds = (torch.sigmoid(logits) > 0.5).float()
                 acc_val = (preds == labels).float().mean()
 
                 batch_loss.append(loss.item())
@@ -357,7 +357,7 @@ class LocalUpdate(object):
             agg_protos_label: 聚合后的本地原型字典
         """
         model.train()
-        epoch_loss = {'total': [], '1': [], '2': [], '3': []}
+        epoch_loss = {'total': [], '1': [], '2': [], '3': []}#只有 'total' 带了 λ 加权，'1' '2' '3' 都是原始值。
 
         use_dist = getattr(args, 'use_distributional', False)
         use_dis = getattr(args, 'use_disentangle', False)
@@ -383,22 +383,22 @@ class LocalUpdate(object):
                 # ── 解析模型输出 ──
                 if use_dis and use_dist:
                     # 解耦 + 分布: (logits, mu_sem, logvar_sem, mu_style, logvar_style)
-                    log_probs, mu_sem, logvar_sem, mu_style, logvar_style = output
+                    logits, mu_sem, logvar_sem, mu_style, logvar_style = output
                     proto_for_share = (mu_sem, logvar_sem)
                     proto_for_style = (mu_style, logvar_style)
                 elif use_dis:
                     # 解耦 + 点原型: (logits, z_sem, z_style)
-                    log_probs, z_sem, z_style = output
+                    logits, z_sem, z_style = output
                     proto_for_share = z_sem
                     proto_for_style = z_style
                 elif use_dist:
-                    log_probs, mu, logvar = output
+                    logits, mu, logvar = output
                     proto_for_share = (mu, logvar)
                 else:
-                    log_probs, protos = output
+                    logits, protos = output
                     proto_for_share = protos
 
-                loss1 = self.criterion(log_probs, labels)
+                loss1 = self.criterion(logits, labels)
 
                 # ── 解耦独立性损失 L_dis ──
                 if use_dis:
@@ -508,7 +508,7 @@ class LocalUpdate(object):
                                     agg_protos_label[lbl_idx] = [proto_val]
 
                 # 多标签 per-label 准确率（所有标签位置的平均匹配率）
-                preds = (torch.sigmoid(log_probs) > 0.5).float()
+                preds = (torch.sigmoid(logits) > 0.5).float()
                 acc_val = (preds == labels).float().mean()
 
                 if self.args.verbose and (batch_idx % 10 == 0):
