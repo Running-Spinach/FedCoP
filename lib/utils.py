@@ -226,15 +226,16 @@ def exp_details(args):
     print(f'    Local Batch size   : {args.local_bs}')
     print(f'    Local Epochs       : {args.train_ep}\n')
 
-    if args.alg == 'fedprox':
-        print(f'    FedProx mu         : {args.fedprox_mu}')
-    if args.alg == 'scaffold':
-        scaffold_lr = args.scaffold_lr or args.lr
-        print(f'    SCAFFOLD global lr : {scaffold_lr}')
+    if args.alg == 'fedgmkd':
+        print(f'    GMM components     : {getattr(args, "gmm_components", 3)}')
+    if args.alg == 'fedbcs':
+        print('    Style recalibration : AdaptiveIN (1D)')
+    if args.alg == 'fedseproto':
+        print(f'    MI lambda           : {getattr(args, "mi_lambda", 0.05)}')
 
     if args.alg == 'fedproto':
         print('    Prototype mode     : Point (baseline)')
-    if args.alg == 'dppfl':
+    if args.alg == 'd2fl':
         if getattr(args, 'use_distributional', False):
             print('    Prototype mode     : Distributional')
             print(f'    Distribution type   : {args.dist_type}')

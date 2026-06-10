@@ -2,11 +2,11 @@ meta:
   theme: tech-blue
   layout: horizontal
   source: edited
-  title: DPP-FL Architecture
+  title: D²-FL Architecture
 modules: []
 nodes:
   - id: ntitle
-    label: DPP-FL Framework Overview
+    label: D²-FL Framework Overview
     type: service
     position:
       x: 648

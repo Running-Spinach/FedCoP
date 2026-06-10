@@ -3,7 +3,7 @@
 # 原型来自 fc1 输出（点原型）或 ProtoHead 输出（分布原型）
 #
 # FedProto 基线: ResNet50 (from scratch, Kaiming init)
-# DPP-FL 提出方法: DPPFLResNet (ImageNet pretrained backbone)
+# D²-FL 提出方法: D2FLResNet (ImageNet pretrained backbone)
 
 import sys
 from pathlib import Path
@@ -197,8 +197,8 @@ class ResNet50(nn.Module):
             return logits, proto_features
 
 
-class DPPFLResNet(nn.Module):
-    """DPP-FL 专用模型：ImageNet 预训练 ResNet-50 + 增强原型头 + 分类头
+class D2FLResNet(nn.Module):
+    """D²-FL 专用模型：ImageNet 预训练 ResNet-50 + 增强原型头 + 分类头
 
     核心创新（相比 FedProto 基线）：
       1. 端到端可学习分布原型 — 深度 ProtoHead 输出 N(μ, σ²)，校准初始化
@@ -253,7 +253,7 @@ class DPPFLResNet(nn.Module):
         # ── 分类头 ──
         self.fc2 = nn.Linear(self.proto_dim, self.num_classes)
 
-        # ── 增强原型解耦（DPP-FL 专属）──
+        # ── 增强原型解耦（D²-FL 专属）──
         if self.use_disentangle:
             sem_ratio = getattr(args, 'sem_ratio', 0.75)
             self.dis_head = EnhancedDisentangledProtoHead(

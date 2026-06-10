@@ -1,16 +1,16 @@
-# DPP-FL: Distributional Dual-Stream Federated Pathology Representation Learning
+# D²-FL: Distributional Dual-Stream Federated Pathology Representation Learning
 
 > **Authors**: [Your Name]
 >
 > **Affiliation**: [Your Institution]
 >
-> **Code**: https://github.com/[repo]/DPP-FL
+> **Code**: https://github.com/[repo]/D²-FL
 
 ---
 
 ## Abstract
 
-Federated Learning (FL) enables privacy-preserving collaborative model training across distributed medical institutions. However, existing FL methods face three fundamental challenges in real-world medical imaging scenarios: (1) **data heterogeneity** (non-IID label distributions across hospitals), (2) **domain shift** (different imaging equipment and acquisition parameters), and (3) **privacy-utility trade-off** (differential privacy noise degrades performance). We propose **DPP-FL** (Distributional Pathology Prototype Federated Learning), a novel prototype-based FL framework that addresses all three challenges simultaneously. DPP-FL introduces five key innovations over the FedProto baseline: (i) **distributional prototypes** that model per-class features as Gaussian distributions $\mathcal{N}(\mu, \sigma^2)$ rather than point vectors, capturing client-level uncertainty; (ii) **Bayesian fusion** via precision-weighted averaging for optimal global prototype aggregation; (iii) **prototype disentanglement** into semantic (disease-discriminative, shared) and style (imaging-characteristic, local) subspaces with HSIC independence constraints; (iv) **prototype EMA momentum** and **adaptive $\lambda$ warmup** for stable training; and (v) **temperature-scaled inference** for calibrated predictions. Comprehensive experiments on NIH ChestX-ray14 under non-IID federated settings demonstrate DPP-FL's superior performance over five baseline FL algorithms (FedAvg, FedProx, FedBN, SCAFFOLD, FedProto), with particularly significant gains under strong differential privacy ($\varepsilon \leq 8$).
+Federated Learning (FL) enables privacy-preserving collaborative model training across distributed medical institutions. However, existing FL methods face three fundamental challenges in real-world medical imaging scenarios: (1) **data heterogeneity** (non-IID label distributions across hospitals), (2) **domain shift** (different imaging equipment and acquisition parameters), and (3) **privacy-utility trade-off** (differential privacy noise degrades performance). We propose **D²-FL** (Distributional Pathology Prototype Federated Learning), a novel prototype-based FL framework that addresses all three challenges simultaneously. D²-FL introduces five key innovations over the FedProto baseline: (i) **distributional prototypes** that model per-class features as Gaussian distributions $\mathcal{N}(\mu, \sigma^2)$ rather than point vectors, capturing client-level uncertainty; (ii) **Bayesian fusion** via precision-weighted averaging for optimal global prototype aggregation; (iii) **prototype disentanglement** into semantic (disease-discriminative, shared) and style (imaging-characteristic, local) subspaces with HSIC independence constraints; (iv) **prototype EMA momentum** and **adaptive $\lambda$ warmup** for stable training; and (v) **temperature-scaled inference** for calibrated predictions. Comprehensive experiments on NIH ChestX-ray14 under non-IID federated settings demonstrate D²-FL's superior performance over five baseline FL algorithms (FedAvg, FedProx, FedBN, SCAFFOLD, FedProto), with particularly significant gains under strong differential privacy ($\varepsilon \leq 8$).
 
 ---
 
@@ -113,9 +113,9 @@ $$\mathbf{G}[c] = \frac{1}{K} \sum_{k=1}^{K} \mathbf{P}_k^{[c]}$$
 
 ---
 
-## 3. Proposed Method: DPP-FL
+## 3. Proposed Method: D²-FL
 
-DPP-FL extends FedProto with five key innovations. We present each component in detail.
+D²-FL extends FedProto with five key innovations. We present each component in detail.
 
 ### 3.1 Distributional Prototypes
 
@@ -363,7 +363,7 @@ where $d_{\text{proto}} = 256$, $d_{\text{sem}} = \alpha \cdot d_{\text{proto}} 
 
 **Proof sketch**: The expected L2 norm of DP Gaussian noise $\mathcal{N}(0, \sigma^2 C^2 \mathbf{I}_d)$ in $d$ dimensions is $\mathbb{E}[\|\boldsymbol{\epsilon}\|_2] \propto \sqrt{d}$. Since disentanglement reduces the uploaded vector dimension from $d$ to $\alpha d$, the absolute noise magnitude decreases by a factor of $\sqrt{\alpha}$ for the same noise multiplier $\sigma$, yielding the relationship above.
 
-**Implication**: The disentanglement + DP combination is synergistic — disentanglement not only improves prototype purity but also amplifies the effective privacy budget, making DPP-FL particularly advantageous in low-$\varepsilon$ regimes.
+**Implication**: The disentanglement + DP combination is synergistic — disentanglement not only improves prototype purity but also amplifies the effective privacy budget, making D²-FL particularly advantageous in low-$\varepsilon$ regimes.
 
 ---
 
@@ -373,7 +373,7 @@ All six algorithms support $(\varepsilon, \delta)$-Differential Privacy via the 
 
 ### 5.1 Mechanism
 
-**Prototype-based algorithms (FedProto / DPP-FL)**: `DPMechProto` applies L2 clipping + Gaussian noise to the `(mu || logvar)` concatenated vector.
+**Prototype-based algorithms (FedProto / D²-FL)**: `DPMechProto` applies L2 clipping + Gaussian noise to the `(mu || logvar)` concatenated vector.
 
 **Weight-based algorithms (FedAvg / FedProx / FedBN / SCAFFOLD)**: `DPMechWeight` applies L2 clipping + Gaussian noise to the weight delta $\mathbf{w}_{\text{local}} - \mathbf{w}_{\text{global}}$.
 
@@ -420,7 +420,7 @@ $$\sigma^* = \underset{\sigma}{\operatorname{argmin}} \; |\varepsilon_{\text{com
 
 ## 6. Model Architecture
 
-### 6.1 DPPFLResNet: Pretrained ResNet-50 Backbone
+### 6.1 D2FLResNet: Pretrained ResNet-50 Backbone
 
 All algorithms share the same architecture with ImageNet-pretrained weights:
 
@@ -487,11 +487,11 @@ where $W = \text{ways}$, $S = \text{stdev}$, $C = 14$ (total classes).
 | **FedBN** | Weight-sharing baseline | Model weights (skip BN) | High | Local BN stats | Weight delta |
 | **SCAFFOLD** | Weight-sharing baseline | Weights + control variates | Very high (~2×) | Gradient correction | Weight delta |
 | **FedProto** | Prototype-sharing baseline | Point prototypes (256d × 14) | **Low** | Prototype regularization | Prototype vector |
-| **DPP-FL (Ours)** | **Prototype-sharing (proposed)** | Gaussian prototypes $\mathcal{N}(\mu, \sigma^2)$ | **Low** | Distributional + Bayesian + Disentanglement | Prototype vector |
+| **D²-FL (Ours)** | **Prototype-sharing (proposed)** | Gaussian prototypes $\mathcal{N}(\mu, \sigma^2)$ | **Low** | Distributional + Bayesian + Disentanglement | Prototype vector |
 
-### 8.1 DPP-FL vs. FedProto: Detailed Comparison
+### 8.1 D²-FL vs. FedProto: Detailed Comparison
 
-| Feature | FedProto (Baseline) | DPP-FL (Proposed) |
+| Feature | FedProto (Baseline) | D²-FL (Proposed) |
 |---------|--------------------|--------------------|
 | Backbone | Pretrained ResNet-50 | Pretrained ResNet-50 |
 | Prototype type | Point vector $\mathbf{p} \in \mathbb{R}^d$ | Gaussian $\mathcal{N}(\boldsymbol{\mu}, \boldsymbol{\sigma}^2)$ |
@@ -507,7 +507,7 @@ where $W = \text{ways}$, $S = \text{stdev}$, $C = 14$ (total classes).
 
 ---
 
-## 9. DPP-FL Complete Algorithm
+## 9. D²-FL Complete Algorithm
 
 ### Pseudocode
 
@@ -574,7 +574,7 @@ Return acc_l, acc_g
 
 ### Loss Function in Full Detail
 
-The complete local training objective for the disentangled distributional DPP-FL variant:
+The complete local training objective for the disentangled distributional D²-FL variant:
 
 $$\boxed{\begin{aligned}
 \mathcal{L}_{\text{total}} &= \underbrace{-\sum_{c=1}^{C} \left[ y_c \log \sigma(f_c) + (1-y_c) \log(1-\sigma(f_c)) \right]}_{\mathcal{L}_{\text{BCE}}: \text{ multi-label classification}} \\
@@ -602,7 +602,7 @@ where:
 | $C$ | Total number of classes (14 for ChestX-ray14) |
 | $\mathcal{C}_k$ | Set of classes owned by client $k$ |
 | $d$ | Prototype dimension (256) |
-| $f_k$ | Local model (DPPFLResNet) for client $k$ |
+| $f_k$ | Local model (D2FLResNet) for client $k$ |
 | $\mathbf{p}_k^{(i)}$ | Prototype vector of sample $i$ from client $k$ |
 | $\mathbf{P}_k^{[c]}$ | Aggregated prototype of class $c$ at client $k$ |
 | $\mathbf{G}^{[c]}$ | Global prototype of class $c$ |

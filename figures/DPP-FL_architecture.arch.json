@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "title": "DPP-FL Architecture",
+  "title": "D²-FL Architecture",
   "type": "flow-diagram",
   "source": "edited",
   "profile": "default",
@@ -14,7 +14,7 @@
   "nodes": [
     {
       "id": "ntitle",
-      "label": "DPP-FL Framework Overview",
+      "label": "D²-FL Framework Overview",
       "type": "service",
       "size": "xl"
     },

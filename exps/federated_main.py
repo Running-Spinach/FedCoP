@@ -1,6 +1,6 @@
-# 功能：DPP-FL 联邦学习主程序入口（ChestX-ray14 + 预训练 ResNet-50）
+# 功能：D²-FL 联邦学习主程序入口（ChestX-ray14 + 预训练 ResNet-50）
 # 支持 6 种 FL 算法（全部使用预训练骨干 + 差分隐私进行公平对比）：
-#   FedProto, DPP-FL, FedAvg, FedProx, FedBN, SCAFFOLD
+#   FedProto, D²-FL, FedAvg, FedProx, FedBN, SCAFFOLD
 
 import copy, sys              # 深拷贝 / 系统路径管理
 import time                     # 计时与时间戳
@@ -8,7 +8,7 @@ import numpy as np              # 数值计算、数组操作
 from tqdm import tqdm           # 进度条显示
 import torch                    # 深度学习框架
 
-from lib.update import test_inference_new_het_lt_DPPFL
+from lib.update import test_inference_new_het_lt_D2FL
 from tensorboardX import SummaryWriter  # TensorBoard 日志记录
 import random                   # 随机数生成（种子设置）
 from pathlib import Path        # 跨平台路径处理
@@ -22,9 +22,13 @@ if str(mod_dir) not in sys.path:
 
 from options import args_parser                              # 命令行参数解析
 from update import (LocalUpdate, test_inference_new_het_lt,  # 客户端本地训练 / 异构长尾测试推理
-                    eval_clients_multilabel)                 # 多标签客户端评估
-from models.resnet import DPPFLResNet, ResNet50                       # 预训练 ResNet-50 骨干网络
-from utils import (get_dataset, average_weights, average_weights_fedbn,  # 数据集加载 / 普通加权平均 / FedBN 加权平均
+                    eval_clients_multilabel,                 # 多标签客户端评估
+                    _update_weights_FedGMKD, _agg_func_FedGMKD,
+                    _proto_aggregation_FedGMKD,
+                    _update_weights_FedBCS,
+                    _update_weights_FedSeProto)
+from models.resnet import D2FLResNet, ResNet50                       # 预训练 ResNet-50 骨干网络
+from utils import (get_dataset, average_weights,                  # 数据集加载 / 普通加权平均
                    exp_details, proto_aggregation, agg_func)             # 实验详情打印 / 原型聚合 / 通用聚合函数
 from dp import (DPMechProto, DPMechWeight, MomentsAccountant,  # 原型差分隐私机制 / 权重差分隐私机制 / 矩会计隐私追踪
                 compute_noise_multiplier_from_epsilon)          # 由 epsilon 反推噪声乘数
@@ -130,13 +134,13 @@ def FedProto_taskheter(args, train_dataset, test_dataset, user_groups,
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  DPP-FL (提出方法)
+#  D²-FL (提出方法)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
+def D2FL_taskheter(args, train_dataset, test_dataset, user_groups,
                     user_groups_lt, local_model_list, classes_list):
     """
-    DPP-FL: Distributional Pathology Prototype Federated Learning (提出方法)
+    D²-FL: Distributional Pathology Prototype Federated Learning (提出方法)
 
     相比 FedProto 基线的 SOTA 提升：
       1. ImageNet 预训练 ResNet-50 骨干（vs from-scratch）
@@ -206,7 +210,7 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
         for idx in idxs_users:#每轮随机选择部分客户端参与训练
             local_model = LocalUpdate(args=args, dataset=train_dataset,
                                       idxs=user_groups[idx])
-            w, loss, acc, protos = local_model.update_weights_DPPFL(
+            w, loss, acc, protos = local_model.update_weights_D2FL(
                 args, idx, global_protos,
                 model=copy.deepcopy(local_model_list[idx]),
                 global_round=round, ld=ld)
@@ -283,7 +287,7 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
         train_loss.append(sum(local_losses) / len(local_losses))
 
     # ── 最终评估（带温度缩放 + 解耦感知）──
-    acc_list_l, acc_list_g, loss_list = test_inference_new_het_lt_DPPFL(
+    acc_list_l, acc_list_g, loss_list = test_inference_new_het_lt_D2FL(
         args, local_model_list, test_dataset, classes_list, user_groups_lt,
         global_protos, temperature=temperature)
 
@@ -382,206 +386,208 @@ def FedAvg_taskheter(args, train_dataset, test_dataset, user_groups,
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  FedProx
+#  FedGMKD (NeurIPS 2024): GMM-based Prototype Federated Learning
+#  对比价值 vs D²-FL:
+#    - GMM 后处理（EM拟合）vs 端到端 NN 输出分布参数
+#    - 多分量高斯原型 vs 单高斯 + 校准
+#    - Discrepancy-Aware Aggregation (质量+数量) vs Bayesian Fusion
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def FedProx_taskheter(args, train_dataset, test_dataset, user_groups,
-                      user_groups_lt, local_model_list, classes_list):
-    """FedProx 联邦近端优化：L = L_CE + (mu/2)*||w - w_global||^2
-
-    通过近端项约束本地更新不偏离全局模型太远，适合 Non-IID 场景。
-
-    每轮流程：
-      1. 采样客户端 → 带近端正则的本地训练
-      2. 收集本地模型 → 等权平均聚合
-      3. （可选）差分隐私（对权重 delta 裁剪+加噪）
-
-    返回:
-        acc_list: 各客户端 per-label 准确率列表
-    """
-    use_dp = getattr(args, 'use_dp', False)
-
-    summary_writer = SummaryWriter(
-        f'../tensorboard/chestxray_{args.alg}_mu{args.fedprox_mu}_'
-        f'{args.ways}w{args.shots}s_'
-        f'{args.num_users}u_{args.rounds}r'
-    )
-
-    global_model = copy.deepcopy(local_model_list[0])
-    global_model.to(args.device)
-    train_loss = []
-    m = max(1, int(args.frac * args.num_users))
-
-    if use_dp:
-        accountant = MomentsAccountant(delta=args.dp_delta)
-        per_round_noise = compute_noise_multiplier_from_epsilon(
-            args.dp_epsilon / args.rounds, sample_rate=1.0, delta=args.dp_delta)
-        dp_mech = DPMechWeight(clip_norm=args.dp_clip,
-                               noise_multiplier=per_round_noise, use_dp=True)
-        print(f'DP enabled: target_epsilon={args.dp_epsilon}, noise_multiplier={per_round_noise:.4f}')
-    else:
-        accountant = None
-        dp_mech = DPMechWeight(use_dp=False)
-
-    for round in tqdm(range(args.rounds)):
-        local_weights, local_losses = [], []
-        print(f'\n | Global Training Round : {round + 1} |\n')
-
-        idxs_users = np.random.choice(args.num_users, m, replace=False)
-        global_state = global_model.state_dict()
-
-        for idx in idxs_users:
-            local_update = LocalUpdate(args=args, dataset=train_dataset,
-                                       idxs=user_groups[idx])
-            w, loss, acc = local_update.update_weights_fedprox(
-                idx, global_state, copy.deepcopy(global_model), global_round=round)
-
-            # DP: 对权重 delta 裁剪 + 加噪
-            w = dp_mech.clip_and_noise(w, global_state)
-
-            local_weights.append(copy.deepcopy(w))
-            local_losses.append(copy.deepcopy(loss))
-
-            summary_writer.add_scalar(f'Train/Loss/user{idx+1}', loss, round)
-            summary_writer.add_scalar(f'Train/Acc/user{idx+1}', acc, round)
-
-        global_weight = average_weights(local_weights)
-        global_model.load_state_dict(global_weight)
-
-        for i in range(args.num_users):
-            local_model_list[i] = copy.deepcopy(global_model)
-
-        if use_dp and accountant is not None:
-            sample_rate = dp_mech.sample_rate(len(idxs_users), args.num_users)
-            rdp_eps = accountant.compute_rdp_gaussian(dp_mech.noise_multiplier, sample_rate)
-            accountant.accumulate(rdp_eps)
-            print(f'| Round {round+1} | DP epsilon: {accountant.get_epsilon():.4f}')
-
-        train_loss.append(sum(local_losses) / len(local_losses))
-
-    acc_list = eval_clients_multilabel(
-        args, local_model_list, test_dataset, user_groups_lt)
-
-    print('For all users, mean of per-label acc is {:.5f}, std is {:.5f}'.format(
-        np.mean(acc_list), np.std(acc_list)))
-    return acc_list
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  FedBN
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def FedBN_taskheter(args, train_dataset, test_dataset, user_groups,
-                    user_groups_lt, local_model_list, classes_list):
-    """FedBN 联邦批归一化：聚合 CNN/FC 参数，保留客户端本地 BN 统计量
-
-    适合 Non-IID 特征分布差异场景（不同医院的成像风格不同）。
-    BN 层的 running_mean/var 和 gamma/beta 不参与聚合。
-
-    每轮流程：
-      1. 采样客户端 → 本地 SGD 训练
-      2. 收集本地模型 → 仅平均非 BN 层参数
-      3. 客户端恢复本地 BN 参数，未参与客户端保持不变
-      4. （可选）差分隐私（对权重 delta 裁剪+加噪）
-
-    返回:
-        acc_list: 各客户端 per-label 准确率列表
-    """
-    use_dp = getattr(args, 'use_dp', False)
-
-    summary_writer = SummaryWriter(
-        f'../tensorboard/chestxray_{args.alg}_'
-        f'{args.ways}w{args.shots}s_'
-        f'{args.num_users}u_{args.rounds}r'
-    )
-
-    global_model = copy.deepcopy(local_model_list[0])
-    global_model.to(args.device)
-    train_loss = []
-    m = max(1, int(args.frac * args.num_users))
-
-    if use_dp:
-        accountant = MomentsAccountant(delta=args.dp_delta)
-        per_round_noise = compute_noise_multiplier_from_epsilon(
-            args.dp_epsilon / args.rounds, sample_rate=1.0, delta=args.dp_delta)
-        dp_mech = DPMechWeight(clip_norm=args.dp_clip,
-                               noise_multiplier=per_round_noise, use_dp=True)
-        print(f'DP enabled: target_epsilon={args.dp_epsilon}, noise_multiplier={per_round_noise:.4f}')
-    else:
-        accountant = None
-        dp_mech = DPMechWeight(use_dp=False)
-
-    for round in tqdm(range(args.rounds)):
-        local_weights, local_losses = [], []
-        print(f'\n | Global Training Round : {round + 1} |\n')
-
-        idxs_users = np.random.choice(args.num_users, m, replace=False)
-        global_state = global_model.state_dict()
-
-        for idx in idxs_users:
-            local_update = LocalUpdate(args=args, dataset=train_dataset,
-                                       idxs=user_groups[idx])
-            w, loss, acc = local_update.update_weights(
-                idx, copy.deepcopy(global_model), global_round=round)
-
-            # DP: 对权重 delta 裁剪 + 加噪
-            w = dp_mech.clip_and_noise(w, global_state)
-
-            local_weights.append(copy.deepcopy(w))
-            local_losses.append(copy.deepcopy(loss))
-
-            summary_writer.add_scalar(f'Train/Loss/user{idx+1}', loss, round)
-            summary_writer.add_scalar(f'Train/Acc/user{idx+1}', acc, round)
-
-        # FedBN 聚合：跳过 BN 层参数
-        global_weight = average_weights_fedbn(local_weights)
-
-        for i in range(args.num_users):
-            if i in idxs_users:
-                local_bn_state = {
-                    k: v for k, v in local_model_list[i].state_dict().items()
-                    if 'bn' in k or 'running_mean' in k or 'running_var' in k
-                }
-                local_model_list[i].load_state_dict(global_weight, strict=False)
-                local_model_list[i].load_state_dict(local_bn_state, strict=False)
-            # 未参与的客户端保持原样
-
-        global_model.load_state_dict(global_weight, strict=False)
-
-        if use_dp and accountant is not None:
-            sample_rate = dp_mech.sample_rate(len(idxs_users), args.num_users)
-            rdp_eps = accountant.compute_rdp_gaussian(dp_mech.noise_multiplier, sample_rate)
-            accountant.accumulate(rdp_eps)
-            print(f'| Round {round+1} | DP epsilon: {accountant.get_epsilon():.4f}')
-
-        train_loss.append(sum(local_losses) / len(local_losses))
-
-    acc_list = eval_clients_multilabel(
-        args, local_model_list, test_dataset, user_groups_lt)
-
-    print('For all users, mean of per-label acc is {:.5f}, std is {:.5f}'.format(
-        np.mean(acc_list), np.std(acc_list)))
-    return acc_list
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SCAFFOLD
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def SCAFFOLD_taskheter(args, train_dataset, test_dataset, user_groups,
+def FedGMKD_taskheter(args, train_dataset, test_dataset, user_groups,
                        user_groups_lt, local_model_list, classes_list):
-    """SCAFFOLD 联邦方差缩减：使用 control variate 修正客户端漂移
+    """FedGMKD: GMM 后处理原型 + Discrepancy-Aware 聚合 + 知识蒸馏
 
-    核心思路：维护全局和本地 control variate（c_global / c_local），
-    在本地训练时修正梯度以抵消 Non-IID 数据的漂移效应。
+    每轮流程:
+      1. 客户端本地训练（L_CE + 原型对齐）
+      2. 每类特征拟合 GMM（EM后处理）→ 上传 (weights, means, logvars)
+      3. 服务器 Quality-weighted 聚合
+    """
+    use_dist = getattr(args, 'use_distributional', True)
+    use_dp = getattr(args, 'use_dp', False)
+    n_gmm = getattr(args, 'gmm_components', 3)
 
-    每轮流程：
-      1. 采样客户端 → 本地训练（梯度修正 g_corr = g - c_local + c_global）
-      2. 服务器聚合模型 → 更新 c_global = c_global + avg(c_delta)
-      3. （可选）差分隐私（对权重 delta 裁剪+加噪）
+    summary_writer = SummaryWriter(
+        f'../tensorboard/chestxray_{args.alg}_gmm{n_gmm}_'
+        f'{args.ways}w{args.shots}s_'
+        f'{args.num_users}u_{args.rounds}r'
+    )
 
-    返回:
-        acc_list: 各客户端 per-label 准确率列表
+    global_protos = []
+    train_loss = []
+    m = max(1, int(args.frac * args.num_users))
+
+    if use_dp:
+        accountant = MomentsAccountant(delta=args.dp_delta)
+        per_round_noise = compute_noise_multiplier_from_epsilon(
+            args.dp_epsilon / args.rounds, sample_rate=1.0, delta=args.dp_delta)
+        dp_mech = DPMechProto(clip_norm=args.dp_clip,
+                              noise_multiplier=per_round_noise, use_dp=True)
+        print(f'DP enabled: target_epsilon={args.dp_epsilon}, noise_multiplier={per_round_noise:.4f}')
+    else:
+        accountant = None
+        dp_mech = DPMechProto(use_dp=False)
+
+    for round in tqdm(range(args.rounds)):
+        local_weights, local_losses, local_protos = [], [], {}
+        print(f'\n | Global Training Round : {round + 1} |\n')
+
+        idxs_users = np.random.choice(args.num_users, m, replace=False)
+
+        for idx in idxs_users:
+            local_model = LocalUpdate(args=args, dataset=train_dataset,
+                                      idxs=user_groups[idx])
+            w, loss, acc, protos = _update_weights_FedGMKD(
+                local_model, args, idx, global_protos,
+                model=copy.deepcopy(local_model_list[idx]),
+                global_round=round, ld=args.ld)
+
+            # GMM 后处理聚合（核心区别于 D²-FL 的端到端方式）
+            agg_protos = _agg_func_FedGMKD(protos, n_components=n_gmm)
+            local_weights.append(copy.deepcopy(w))
+            local_losses.append(copy.deepcopy(loss['total']))
+            local_protos[idx] = agg_protos
+
+            summary_writer.add_scalar(f'Train/Loss/user{idx+1}', loss['total'], round)
+            summary_writer.add_scalar(f'Train/Loss1-CE/user{idx+1}', loss['1'], round)
+            summary_writer.add_scalar(f'Train/Loss2-Proto/user{idx+1}', loss['2'], round)
+            summary_writer.add_scalar(f'Train/Acc/user{idx+1}', acc, round)
+
+        if use_dp:
+            for idx in idxs_users:
+                local_protos[idx] = dp_mech.clip_and_noise(local_protos[idx])
+
+        for i_w, idx in enumerate(idxs_users):
+            local_model = copy.deepcopy(local_model_list[idx])
+            local_model.load_state_dict(local_weights[i_w], strict=True)
+            local_model_list[idx] = local_model
+
+        # Discrepancy-Aware 聚合
+        global_protos = _proto_aggregation_FedGMKD(local_protos)
+
+        if use_dp and accountant is not None:
+            sample_rate = dp_mech.sample_rate(len(idxs_users), args.num_users)
+            rdp_eps = accountant.compute_rdp_gaussian(dp_mech.noise_multiplier, sample_rate)
+            accountant.accumulate(rdp_eps)
+            print(f'| Round {round+1} | DP epsilon: {accountant.get_epsilon():.4f}')
+
+        train_loss.append(sum(local_losses) / len(local_losses))
+
+    acc_list = eval_clients_multilabel(
+        args, local_model_list, test_dataset, user_groups_lt)
+
+    print('For all users, mean of per-label acc is {:.5f}, std is {:.5f}'.format(
+        np.mean(acc_list), np.std(acc_list)))
+    return acc_list
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FedBCS (AAAI 2026): Frequency-Domain Style Recalibration
+#  对比价值 vs D²-FL:
+#    - 频域风格-内容分离（AdaptiveIN）vs 可学习门控解耦
+#    - 单一风格重校准 vs HSIC + 对抗 + 对比三重机制
+#    - 点原型 vs 分布原型
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def FedBCS_taskheter(args, train_dataset, test_dataset, user_groups,
+                      user_groups_lt, local_model_list, classes_list):
+    """FedBCS: 频域风格重校准 + 域不变原型
+
+    每轮流程:
+      1. 客户端本地训练（L_CE + 风格重校准原型对齐）
+      2. 上传重校准后的原型（已去除客户端风格偏差）
+      3. 服务器标准原型聚合
+    """
+    use_dist = getattr(args, 'use_distributional', False)
+    use_dp = getattr(args, 'use_dp', False)
+
+    summary_writer = SummaryWriter(
+        f'../tensorboard/chestxray_{args.alg}_'
+        f'{args.ways}w{args.shots}s_'
+        f'{args.num_users}u_{args.rounds}r'
+    )
+
+    global_protos = []
+    train_loss = []
+    m = max(1, int(args.frac * args.num_users))
+
+    if use_dp:
+        accountant = MomentsAccountant(delta=args.dp_delta)
+        per_round_noise = compute_noise_multiplier_from_epsilon(
+            args.dp_epsilon / args.rounds, sample_rate=1.0, delta=args.dp_delta)
+        dp_mech = DPMechProto(clip_norm=args.dp_clip,
+                              noise_multiplier=per_round_noise, use_dp=True)
+        print(f'DP enabled: target_epsilon={args.dp_epsilon}, noise_multiplier={per_round_noise:.4f}')
+    else:
+        accountant = None
+        dp_mech = DPMechProto(use_dp=False)
+
+    for round in tqdm(range(args.rounds)):
+        local_weights, local_losses, local_protos = [], [], {}
+        print(f'\n | Global Training Round : {round + 1} |\n')
+
+        idxs_users = np.random.choice(args.num_users, m, replace=False)
+
+        for idx in idxs_users:
+            local_model = LocalUpdate(args=args, dataset=train_dataset,
+                                      idxs=user_groups[idx])
+            w, loss, acc, protos = _update_weights_FedBCS(
+                local_model, args, idx, global_protos,
+                model=copy.deepcopy(local_model_list[idx]),
+                global_round=round, ld=args.ld)
+
+            agg_protos = agg_func(protos, use_distributional=use_dist)
+            local_weights.append(copy.deepcopy(w))
+            local_losses.append(copy.deepcopy(loss['total']))
+            local_protos[idx] = agg_protos
+
+            summary_writer.add_scalar(f'Train/Loss/user{idx+1}', loss['total'], round)
+            summary_writer.add_scalar(f'Train/Loss1-CE/user{idx+1}', loss['1'], round)
+            summary_writer.add_scalar(f'Train/Loss2-Proto/user{idx+1}', loss['2'], round)
+            summary_writer.add_scalar(f'Train/Acc/user{idx+1}', acc, round)
+
+        if use_dp:
+            for idx in idxs_users:
+                local_protos[idx] = dp_mech.clip_and_noise(local_protos[idx])
+
+        for i_w, idx in enumerate(idxs_users):
+            local_model = copy.deepcopy(local_model_list[idx])
+            local_model.load_state_dict(local_weights[i_w], strict=True)
+            local_model_list[idx] = local_model
+
+        global_protos = proto_aggregation(local_protos, use_distributional=use_dist)
+
+        if use_dp and accountant is not None:
+            sample_rate = dp_mech.sample_rate(len(idxs_users), args.num_users)
+            rdp_eps = accountant.compute_rdp_gaussian(dp_mech.noise_multiplier, sample_rate)
+            accountant.accumulate(rdp_eps)
+            print(f'| Round {round+1} | DP epsilon: {accountant.get_epsilon():.4f}')
+
+        train_loss.append(sum(local_losses) / len(local_losses))
+
+    acc_list = eval_clients_multilabel(
+        args, local_model_list, test_dataset, user_groups_lt)
+
+    print('For all users, mean of per-label acc is {:.5f}, std is {:.5f}'.format(
+        np.mean(acc_list), np.std(acc_list)))
+    return acc_list
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FedSeProto (ECAI 2024): Semantic-Domain Feature Decoupling
+#  对比价值 vs D²-FL:
+#    - 硬分割（独立编码器）+ 互信息最小化 vs 软门控 + 对抗 + 对比
+#    - 点原型（语义特征均值）vs 端到端分布原型 N(μ, σ²)
+#    - HSIC 独立性 vs HSIC + 门控熵 + 正交 + 对抗 + 对比
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def FedSeProto_taskheter(args, train_dataset, test_dataset, user_groups,
+                          user_groups_lt, local_model_list, classes_list):
+    """FedSeProto: 语义-域特征解耦 + 仅共享语义原型
+
+    每轮流程:
+      1. 客户端本地训练: L_CE + L_proto(semantic) + L_MI
+      2. 仅上传语义原型（域特征保留本地）
+      3. 服务器标准原型聚合
     """
     use_dp = getattr(args, 'use_dp', False)
 
@@ -591,65 +597,56 @@ def SCAFFOLD_taskheter(args, train_dataset, test_dataset, user_groups,
         f'{args.num_users}u_{args.rounds}r'
     )
 
-    global_model = copy.deepcopy(local_model_list[0])
-    global_model.to(args.device)
+    global_protos = []
     train_loss = []
     m = max(1, int(args.frac * args.num_users))
-
-    # ── SCAFFOLD 初始化 control variates ──
-    zero_state = {name: torch.zeros_like(param)
-                  for name, param in global_model.named_parameters()}
-    c_global = copy.deepcopy(zero_state)
-    c_local_dict = {i: copy.deepcopy(zero_state)
-                    for i in range(args.num_users)}
 
     if use_dp:
         accountant = MomentsAccountant(delta=args.dp_delta)
         per_round_noise = compute_noise_multiplier_from_epsilon(
             args.dp_epsilon / args.rounds, sample_rate=1.0, delta=args.dp_delta)
-        dp_mech = DPMechWeight(clip_norm=args.dp_clip,
-                               noise_multiplier=per_round_noise, use_dp=True)
+        dp_mech = DPMechProto(clip_norm=args.dp_clip,
+                              noise_multiplier=per_round_noise, use_dp=True)
         print(f'DP enabled: target_epsilon={args.dp_epsilon}, noise_multiplier={per_round_noise:.4f}')
     else:
         accountant = None
-        dp_mech = DPMechWeight(use_dp=False)
+        dp_mech = DPMechProto(use_dp=False)
 
     for round in tqdm(range(args.rounds)):
-        local_weights, local_losses = [], []
-        c_delta_list = []
+        local_weights, local_losses, local_protos = [], [], {}
         print(f'\n | Global Training Round : {round + 1} |\n')
 
         idxs_users = np.random.choice(args.num_users, m, replace=False)
-        global_state = global_model.state_dict()
 
         for idx in idxs_users:
-            local_update = LocalUpdate(args=args, dataset=train_dataset,
-                                       idxs=user_groups[idx])
-            w, loss, acc, c_local_new, c_delta = local_update.update_weights_scaffold(
-                idx, c_global, c_local_dict[idx],
-                copy.deepcopy(local_model_list[idx]), global_round=round)
+            local_model = LocalUpdate(args=args, dataset=train_dataset,
+                                      idxs=user_groups[idx])
+            w, loss, acc, protos = _update_weights_FedSeProto(
+                local_model, args, idx, global_protos,
+                model=copy.deepcopy(local_model_list[idx]),
+                global_round=round, ld=args.ld)
 
-            # DP: 对权重 delta 裁剪 + 加噪
-            w = dp_mech.clip_and_noise(w, global_state)
-
+            agg_protos = agg_func(protos, use_distributional=False)
             local_weights.append(copy.deepcopy(w))
-            local_losses.append(copy.deepcopy(loss))
-            c_delta_list.append(c_delta)
+            local_losses.append(copy.deepcopy(loss['total']))
+            local_protos[idx] = agg_protos
 
-            c_local_dict[idx] = c_local_new
-            local_model_list[idx].load_state_dict(w)
-
-            summary_writer.add_scalar(f'Train/Loss/user{idx+1}', loss, round)
+            summary_writer.add_scalar(f'Train/Loss/user{idx+1}', loss['total'], round)
+            summary_writer.add_scalar(f'Train/Loss1-CE/user{idx+1}', loss['1'], round)
+            summary_writer.add_scalar(f'Train/Loss2-Proto/user{idx+1}', loss['2'], round)
+            summary_writer.add_scalar(f'Train/Loss3-MI/user{idx+1}', loss['3'], round)
             summary_writer.add_scalar(f'Train/Acc/user{idx+1}', acc, round)
 
-        # ── 服务器更新 ──
-        global_weight = average_weights(local_weights)
-        global_model.load_state_dict(global_weight)
+        if use_dp:
+            for idx in idxs_users:
+                local_protos[idx] = dp_mech.clip_and_noise(local_protos[idx])
 
-        K = len(idxs_users)
-        for key in c_global:
-            delta_sum = sum(cd[key] for cd in c_delta_list)
-            c_global[key] = c_global[key] + delta_sum / K
+        for i_w, idx in enumerate(idxs_users):
+            local_model = copy.deepcopy(local_model_list[idx])
+            local_model.load_state_dict(local_weights[i_w], strict=True)
+            local_model_list[idx] = local_model
+
+        global_protos = proto_aggregation(local_protos, use_distributional=False)
 
         if use_dp and accountant is not None:
             sample_rate = dp_mech.sample_rate(len(idxs_users), args.num_users)
@@ -700,8 +697,8 @@ if __name__ == '__main__':
 
     local_model_list = []
     for i in range(args.num_users):
-        if args.alg == "dppfl":
-            local_model = DPPFLResNet(args=args)
+        if args.alg == "d2fl":
+            local_model = D2FLResNet(args=args)
             local_model.to(args.device)
             local_model.train()
             local_model_list.append(local_model)
@@ -719,21 +716,24 @@ if __name__ == '__main__':
         args.use_dp = False
         FedProto_taskheter(args, train_dataset, test_dataset, user_groups,
                            user_groups_lt, local_model_list, classes_list)
-    elif args.alg == 'dppfl':
-        # 提出的方法：DPP-FL，支持分布原型 + 差分隐私 + SOTA 增强
-        DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
+    elif args.alg == 'd2fl':
+        # 提出的方法：D²-FL，支持分布原型 + 差分隐私 + SOTA 增强
+        D2FL_taskheter(args, train_dataset, test_dataset, user_groups,
                         user_groups_lt, local_model_list, classes_list)
     elif args.alg == 'fedavg':
         FedAvg_taskheter(args, train_dataset, test_dataset, user_groups,
                          user_groups_lt, local_model_list, classes_list)
-    elif args.alg == 'fedprox':
-        FedProx_taskheter(args, train_dataset, test_dataset, user_groups,
+    elif args.alg == 'fedgmkd':
+        args.use_distributional = True
+        FedGMKD_taskheter(args, train_dataset, test_dataset, user_groups,
                           user_groups_lt, local_model_list, classes_list)
-    elif args.alg == 'fedbn':
-        FedBN_taskheter(args, train_dataset, test_dataset, user_groups,
-                        user_groups_lt, local_model_list, classes_list)
-    elif args.alg == 'scaffold':
-        SCAFFOLD_taskheter(args, train_dataset, test_dataset, user_groups,
-                           user_groups_lt, local_model_list, classes_list)
+    elif args.alg == 'fedbcs':
+        args.use_distributional = False
+        FedBCS_taskheter(args, train_dataset, test_dataset, user_groups,
+                         user_groups_lt, local_model_list, classes_list)
+    elif args.alg == 'fedseproto':
+        args.use_distributional = False
+        FedSeProto_taskheter(args, train_dataset, test_dataset, user_groups,
+                             user_groups_lt, local_model_list, classes_list)
 
     print(f'\nTotal time: {time.time() - start_time:.2f}s')

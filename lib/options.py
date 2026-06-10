@@ -30,9 +30,9 @@ def args_parser():
 
     # 模型参数
     parser.add_argument('--model', type=str, default='resnet50', help='模型名称: resnet50 / cnn')
-    parser.add_argument('--alg', type=str, default='dppfl',
-                        choices=['fedproto', 'fedavg', 'fedprox', 'fedbn', 'scaffold', 'dppfl'],
-                        help="FL算法: fedproto(点原型基线), fedavg, fedprox, fedbn, scaffold, dppfl(分布原型+DP, 提出方法)")
+    parser.add_argument('--alg', type=str, default='d2fl',
+                        choices=['fedproto', 'fedavg', 'fedgmkd', 'fedbcs', 'fedseproto', 'd2fl'],
+                        help="FL算法: fedproto(点原型基线), fedavg, fedgmkd(GMM原型/NeurIPS2024), fedbcs(频域风格重校准/AAAI2026), fedseproto(语义域解耦/ECAI2024), d2fl(D²-FL提出方法)")
     parser.add_argument('--num_channels', type=int, default=3, help="图像通道数（ChestX-ray14灰度图转3通道）")
     parser.add_argument('--norm', type=str, default='batch_norm',
                         help="归一化方式: batch_norm, layer_norm, 或 None")
@@ -89,41 +89,41 @@ def args_parser():
     parser.add_argument('--dp_clip', type=float, default=1.0,
                         help='原型的L2范数裁剪界限')
 
-    # FedProx / SCAFFOLD 专属参数
-    parser.add_argument('--fedprox_mu', type=float, default=0.01,
-                        help='FedProx 近端项系数 mu')
-    parser.add_argument('--scaffold_lr', type=float, default=None,
-                        help='SCAFFOLD 全局学习率（默认等于 --lr）')
+    # 新基线专属参数
+    parser.add_argument('--gmm_components', type=int, default=3,
+                        help='FedGMKD: GMM 分量数 (默认 3)')
+    parser.add_argument('--mi_lambda', type=float, default=0.05,
+                        help='FedSeProto: 互信息最小化损失权重 (默认 0.05)')
 
-    # DPP-FL 专属参数（提出方法）
+    # D²-FL 专属参数（提出方法）
     parser.add_argument('--pretrained', action='store_true', default=True,
-                        help='DPP-FL: 使用 ImageNet 预训练 ResNet-50 (默认开启)')
+                        help='D²-FL: 使用 ImageNet 预训练 ResNet-50 (默认开启)')
     parser.add_argument('--proto_momentum', type=float, default=0.9,
-                        help='DPP-FL: 全局原型 EMA 动量系数 (0=无动量)')
+                        help='D²-FL: 全局原型 EMA 动量系数 (0=无动量)')
     parser.add_argument('--ld_warmup', type=int, default=50,
-                        help='DPP-FL: 原型损失权重 warmup 轮数')
+                        help='D²-FL: 原型损失权重 warmup 轮数')
     parser.add_argument('--temperature', type=float, default=1.0,
-                        help='DPP-FL: 原型推理温度系数 (越小越尖锐)')
+                        help='D²-FL: 原型推理温度系数 (越小越尖锐)')
 
-    # 原型解耦参数（DPP-FL 专属，仅 DPP-FL 算法支持）
+    # 原型解耦参数（D²-FL 专属，仅 D²-FL 算法支持）
     parser.add_argument('--use_disentangle', action='store_true',
-                        help='DPP-FL: 启用增强原型解耦 (可学习门控+对抗域不变+对比语义对齐)')
+                        help='D²-FL: 启用增强原型解耦 (可学习门控+对抗域不变+对比语义对齐)')
     parser.add_argument('--sem_ratio', type=float, default=0.75,
-                        help='DPP-FL: 语义维度目标占比 (0-1, 门控正则化引导)')
+                        help='D²-FL: 语义维度目标占比 (0-1, 门控正则化引导)')
     parser.add_argument('--dis_lambda', type=float, default=0.05,
-                        help='DPP-FL: 解耦独立性损失权重 (HSIC+门控熵+正交)')
+                        help='D²-FL: 解耦独立性损失权重 (HSIC+门控熵+正交)')
 
-    # 新增损失权重参数（DPP-FL 增强版专属）
+    # 新增损失权重参数（D²-FL 增强版专属）
     parser.add_argument('--cal_lambda', type=float, default=0.01,
-                        help='DPP-FL: 原型校准损失权重 (logvar ≅ log(distance))')
+                        help='D²-FL: 原型校准损失权重 (logvar ≅ log(distance))')
     parser.add_argument('--contra_lambda', type=float, default=0.05,
-                        help='DPP-FL: 对比语义对齐损失权重 (同类拉近/异类推远)')
+                        help='D²-FL: 对比语义对齐损失权重 (同类拉近/异类推远)')
     parser.add_argument('--adv_lambda', type=float, default=0.01,
-                        help='DPP-FL: 对抗域不变损失权重 (语义不应含域信息)')
+                        help='D²-FL: 对抗域不变损失权重 (语义不应含域信息)')
     parser.add_argument('--ent_lambda', type=float, default=0.001,
-                        help='DPP-FL: 熵正则损失权重 (防止方差坍缩)')
+                        help='D²-FL: 熵正则损失权重 (防止方差坍缩)')
     parser.add_argument('--use_per_class_temp', action='store_true', default=True,
-                        help='DPP-FL: 启用每类可学习温度参数 (默认开启)')
+                        help='D²-FL: 启用每类可学习温度参数 (默认开启)')
 
     args = parser.parse_args()
     return args

@@ -1,6 +1,7 @@
 # 功能：本地更新模块，实现FedProto联邦学习中的本地训练、测试和原型提取
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 import copy
@@ -341,11 +342,11 @@ class LocalUpdate(object):
 
         return model.state_dict(), avg_loss, acc_val.item(), c_local_new, c_delta
 
-    def update_weights_DPPFL(self, args, idx, global_protos, model, global_round=round, ld=None):
+    def update_weights_D2FL(self, args, idx, global_protos, model, global_round=round, ld=None):
         if ld is None:
             ld = args.ld
         """
-        DPP-FL 增强版本地训练：端到端分布原型 + 语义-风格解耦
+        D²-FL 增强版本地训练：端到端分布原型 + 语义-风格解耦
 
         损失函数（7项）：
           L_total = L_CE            (分类)
@@ -360,7 +361,7 @@ class LocalUpdate(object):
             args: 配置参数
             idx: 客户端索引
             global_protos: 全局原型字典
-            model: 当前模型 (DPPFLResNet)
+            model: 当前模型 (D2FLResNet)
             global_round: 全局训练轮次
 
         返回:
@@ -783,14 +784,14 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
 
     return acc_list_l, acc_list_g, loss_list
 
-def test_inference_new_het_lt_DPPFL(args, local_model_list, test_dataset, classes_list, user_groups_gt, global_protos=[], temperature=None):
+def test_inference_new_het_lt_D2FL(args, local_model_list, test_dataset, classes_list, user_groups_gt, global_protos=[], temperature=None):
     """多标签联邦学习测试：分别评估模型自身分类和原型最近邻分类的效果
 
     参数:
         temperature: 原型推理温度系数。None 时自动从 args 读取，默认 1.0
             - T > 1: 软化概率（更平滑）
             - T < 1: 锐化概率（更确信）
-            - 仅 FedProto / DPP-FL 有效
+            - 仅 FedProto / D²-FL 有效
 
     返回:
         acc_list_l: 各客户端用自身模型（sigmoid阈值）的 per-label 准确率
@@ -807,7 +808,7 @@ def test_inference_new_het_lt_DPPFL(args, local_model_list, test_dataset, classe
     def _extract_proto_feat(output):
         """从模型输出中提取用于原型比对的语义特征向量
 
-        增强版 DPPFLResNet 输出格式（return_gate=False）:
+        增强版 D2FLResNet 输出格式（return_gate=False）:
           解耦+分布: (logits, mu_full, logvar_full, mu_sem, logvar_sem, mu_style, logvar_style)
           解耦+点:   (logits, z_full, z_sem, z_style)
           分布:      (logits, mu, logvar)
@@ -903,4 +904,459 @@ def test_inference_new_het_lt_DPPFL(args, local_model_list, test_dataset, classe
         loss_list.append(loss2)
 
     return acc_list_l, acc_list_g, loss_list
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FedGMKD (NeurIPS 2024): GMM-based Prototype Federated Learning
+#  核心区别 vs D²-FL:
+#    - GMM 后处理拟合（EM算法），非端到端 NN 输出
+#    - 多分量高斯原型 vs 单高斯
+#    - Discrepancy-Aware Aggregation (质量+数量加权) vs Bayesian Fusion
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _fit_gmm_pytorch(features, n_components=3, n_iters=10):
+    """
+    简易 EM 算法拟合对角高斯混合模型（纯 PyTorch，无需 sklearn）
+
+    参数:
+        features: (N, D) 特征矩阵
+        n_components: 高斯分量数
+        n_iters: EM 迭代次数
+
+    返回:
+        weights: (K,) 混合权重
+        means: (K, D) 各分量均值
+        logvars: (K, D) 各分量对数方差（对角协方差）
+    """
+    N, D = features.shape
+    K = min(n_components, N)
+    device = features.device
+
+    idxs = torch.randperm(N)[:K]
+    means = features[idxs].clone()
+    logvars = torch.zeros(K, D, device=device)
+    weights = torch.ones(K, device=device) / K
+
+    for _ in range(n_iters):
+        vars_ = torch.exp(logvars) + 1e-8
+        diff = features.unsqueeze(0) - means.unsqueeze(1)
+        log_prob = -0.5 * (torch.log(2 * torch.pi * vars_).sum(dim=1, keepdim=True)
+                           + (diff ** 2 / vars_.unsqueeze(1)).sum(dim=2))
+        log_prob = log_prob + torch.log(weights.unsqueeze(1))
+        log_prob_max = log_prob.max(dim=0, keepdim=True)[0]
+        log_sum = log_prob_max + torch.log(
+            torch.exp(log_prob - log_prob_max).sum(dim=0, keepdim=True) + 1e-8)
+        responsibilities = torch.exp(log_prob - log_sum)
+
+        nk = responsibilities.sum(dim=1) + 1e-8
+        weights = nk / N
+        means = (responsibilities.unsqueeze(2) * features.unsqueeze(0)).sum(dim=1) / nk.unsqueeze(1)
+        diff_new = features.unsqueeze(0) - means.unsqueeze(1)
+        vars_new = (responsibilities.unsqueeze(2) * (diff_new ** 2)).sum(dim=1) / nk.unsqueeze(1)
+        logvars = torch.log(vars_new + 1e-8)
+
+    return weights, means, logvars
+
+
+def _update_weights_FedGMKD(self, args, idx, global_protos, model, global_round=0, ld=None):
+    """
+    FedGMKD 本地训练：GMM 后处理原型 + 质量感知聚合
+
+    L = L_CE + ld * L_gmm_proto
+    关键区别: GMM 在 detach 特征上用 EM 拟合（不可端到端学习）
+    """
+    if ld is None:
+        ld = args.ld
+    model.train()
+    epoch_loss = {'total': [], '1': [], '2': []}
+    use_dist = getattr(args, 'use_distributional', True)
+
+    if self.args.optimizer == 'sgd':
+        optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr, momentum=0.5)
+    elif self.args.optimizer == 'adam':
+        optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr, weight_decay=1e-4)
+
+    for iter in range(self.args.train_ep):
+        batch_loss = {'total': [], '1': [], '2': []}
+        agg_protos_label = {}
+
+        for batch_idx, (images, label_g) in enumerate(self.trainloader):
+            images, labels = images.to(self.device), label_g.to(self.device)
+            model.zero_grad()
+            output = model(images)
+
+            if use_dist:
+                logits, mu, logvar = output
+                proto_feats = mu
+            else:
+                logits, protos = output
+                proto_feats = protos
+
+            loss1 = self.criterion(logits, labels)
+
+            loss_mse = nn.MSELoss()
+            if len(global_protos) == 0:
+                loss2 = 0 * loss1
+            else:
+                loss2 = 0.0
+                count = 0
+                for i_lbl in range(len(labels)):
+                    for lbl_idx in range(args.num_classes):
+                        if labels[i_lbl, lbl_idx] > 0 and lbl_idx in global_protos:
+                            g_val = global_protos[lbl_idx]
+                            if isinstance(g_val, tuple) and len(g_val) == 3:
+                                _gw, g_means, _glv = g_val
+                                l_feat = proto_feats[i_lbl:i_lbl + 1]
+                                dists = ((l_feat - g_means) ** 2).sum(dim=1)
+                                loss2 += dists.min()
+                            elif isinstance(g_val, tuple):
+                                g_mu, _glv = g_val
+                                loss2 += loss_mse(proto_feats[i_lbl:i_lbl + 1],
+                                                  g_mu.unsqueeze(0))
+                            else:
+                                loss2 += loss_mse(proto_feats[i_lbl:i_lbl + 1],
+                                                  g_val.unsqueeze(0))
+                            count += 1
+                loss2 = loss2 / max(count, 1)
+
+            loss = loss1 + loss2 * ld
+            loss.backward()
+            optimizer.step()
+
+            for i_lbl in range(len(labels)):
+                for lbl_idx in range(args.num_classes):
+                    if label_g[i_lbl, lbl_idx] > 0:
+                        if use_dist:
+                            proto_val = (proto_feats[i_lbl, :].detach(),
+                                         logvar[i_lbl, :].detach())
+                        else:
+                            proto_val = proto_feats[i_lbl, :].detach()
+                        if lbl_idx in agg_protos_label:
+                            agg_protos_label[lbl_idx].append(proto_val)
+                        else:
+                            agg_protos_label[lbl_idx] = [proto_val]
+
+            preds = (torch.sigmoid(logits) > 0.5).float()
+            acc_val = (preds == labels).float().mean()
+
+            batch_loss['total'].append(loss.item())
+            batch_loss['1'].append(loss1.item())
+            batch_loss['2'].append(loss2.item() if isinstance(loss2, torch.Tensor) else loss2)
+
+        for key in epoch_loss:
+            if len(batch_loss[key]) > 0:
+                epoch_loss[key].append(sum(batch_loss[key]) / len(batch_loss[key]))
+
+    for key in epoch_loss:
+        if len(epoch_loss[key]) > 0:
+            epoch_loss[key] = sum(epoch_loss[key]) / len(epoch_loss[key])
+
+    return model.state_dict(), epoch_loss, acc_val.item(), agg_protos_label
+
+
+def _agg_func_FedGMKD(protos, n_components=3):
+    """
+    FedGMKD 本地聚合：对每类特征拟合 GMM → (weights, means, logvars)
+    """
+    agg = {}
+    for label, proto_list in protos.items():
+        if isinstance(proto_list[0], tuple):
+            feats = torch.stack([p[0] for p in proto_list])
+        else:
+            feats = torch.stack(proto_list)
+
+        if feats.shape[0] >= n_components:
+            weights, means, logvars = _fit_gmm_pytorch(
+                feats, n_components=n_components, n_iters=10)
+            agg[label] = (weights.detach(), means.detach(), logvars.detach())
+        else:
+            mu_avg = feats.mean(dim=0)
+            logvar_avg = torch.log(feats.var(dim=0, unbiased=False) + 1e-8)
+            agg[label] = (torch.ones(1), mu_avg.unsqueeze(0), logvar_avg.unsqueeze(0))
+    return agg
+
+
+def _proto_aggregation_FedGMKD(local_protos_list):
+    """
+    FedGMKD 全局聚合：Discrepancy-Aware Aggregation
+    quality_k = 1 / mean(variance)
+    """
+    agg_pool = {}
+    for idx in local_protos_list:
+        local_protos = local_protos_list[idx]
+        for label, entry in local_protos.items():
+            if label not in agg_pool:
+                agg_pool[label] = []
+            agg_pool[label].append(entry)
+
+    global_protos = {}
+    for label, proto_list in agg_pool.items():
+        if len(proto_list) == 1:
+            global_protos[label] = proto_list[0]
+        else:
+            all_w, all_m, all_lv, qualities = [], [], [], []
+            for entry in proto_list:
+                w, m, lv = entry
+                all_w.append(w); all_m.append(m); all_lv.append(lv)
+                q = 1.0 / (torch.exp(lv).mean() + 1e-8)
+                qualities.append(q)
+
+            q_t = torch.tensor(qualities, device=all_m[0].device)
+            q_sum = q_t.sum() + 1e-8
+
+            fused_w = torch.stack([w * q for w, q in zip(all_w, qualities)]).sum(dim=0) / q_sum
+            fused_m = torch.stack([m * q for m, q in zip(all_m, qualities)]).sum(dim=0) / q_sum
+            fused_lv = torch.stack([lv * q for lv, q in zip(all_lv, qualities)]).sum(dim=0) / q_sum
+            global_protos[label] = (fused_w, fused_m, fused_lv)
+
+    return global_protos
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FedBCS (AAAI 2026): Frequency-Domain Style Recalibration
+#  1D 适配版：用 InstanceNorm + 可学习仿射替代 FFT 振幅/相位分离
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class StyleRecalibration1D(nn.Module):
+    """FedBCS 风格重校准模块（1D特征适配版）
+
+    原始: FFT → 振幅(风格) / 相位(内容) → 可学习重校准
+    适配: InstanceNorm → 去风格 + 可学习仿射 → 重校准
+    """
+
+    def __init__(self, dim):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.ones(dim))
+        self.beta = nn.Parameter(torch.zeros(dim))
+
+    def forward(self, x):
+        mean = x.mean(dim=0, keepdim=True)
+        std = x.std(dim=0, keepdim=True) + 1e-8
+        x_norm = (x - mean) / std
+        return self.gamma * x_norm + self.beta
+
+
+def _update_weights_FedBCS(self, args, idx, global_protos, model, global_round=0, ld=None):
+    """
+    FedBCS 本地训练：风格重校准 + 原型正则化
+
+    L = L_CE + ld * ||recalibrated_proto - global_proto||²
+    """
+    if ld is None:
+        ld = args.ld
+    model.train()
+    epoch_loss = {'total': [], '1': [], '2': []}
+    use_dist = getattr(args, 'use_distributional', False)
+    proto_dim = getattr(args, 'proto_dim', 256) or 256
+
+    if not hasattr(self, 'style_recal'):
+        self.style_recal = StyleRecalibration1D(proto_dim).to(self.device)
+
+    if self.args.optimizer == 'sgd':
+        optimizer = torch.optim.SGD(
+            list(model.parameters()) + list(self.style_recal.parameters()),
+            lr=self.args.lr, momentum=0.5)
+    elif self.args.optimizer == 'adam':
+        optimizer = torch.optim.Adam(
+            list(model.parameters()) + list(self.style_recal.parameters()),
+            lr=self.args.lr, weight_decay=1e-4)
+
+    for iter in range(self.args.train_ep):
+        batch_loss = {'total': [], '1': [], '2': []}
+        agg_protos_label = {}
+
+        for batch_idx, (images, label_g) in enumerate(self.trainloader):
+            images, labels = images.to(self.device), label_g.to(self.device)
+            model.zero_grad()
+            output = model(images)
+
+            if use_dist:
+                logits, mu, logvar = output
+                proto_raw = mu
+            else:
+                logits, protos = output
+                proto_raw = protos
+
+            loss1 = self.criterion(logits, labels)
+            proto_recal = self.style_recal(proto_raw)
+
+            loss_mse = nn.MSELoss()
+            if len(global_protos) == 0:
+                loss2 = 0 * loss1
+            else:
+                loss2 = 0.0
+                count = 0
+                for i_lbl in range(len(labels)):
+                    for lbl_idx in range(args.num_classes):
+                        if labels[i_lbl, lbl_idx] > 0 and lbl_idx in global_protos:
+                            g_val = global_protos[lbl_idx]
+                            if isinstance(g_val, tuple):
+                                g_mu = g_val[0] if isinstance(g_val, tuple) else g_val
+                                loss2 += loss_mse(proto_recal[i_lbl:i_lbl + 1], g_mu.unsqueeze(0))
+                            else:
+                                loss2 += loss_mse(proto_recal[i_lbl:i_lbl + 1], g_val.unsqueeze(0))
+                            count += 1
+                loss2 = loss2 / max(count, 1)
+
+            loss = loss1 + loss2 * ld
+            loss.backward()
+            optimizer.step()
+
+            for i_lbl in range(len(labels)):
+                for lbl_idx in range(args.num_classes):
+                    if label_g[i_lbl, lbl_idx] > 0:
+                        if use_dist:
+                            proto_val = (proto_recal[i_lbl, :].detach(), logvar[i_lbl, :].detach())
+                        else:
+                            proto_val = proto_recal[i_lbl, :].detach()
+                        if lbl_idx in agg_protos_label:
+                            agg_protos_label[lbl_idx].append(proto_val)
+                        else:
+                            agg_protos_label[lbl_idx] = [proto_val]
+
+            preds = (torch.sigmoid(logits) > 0.5).float()
+            acc_val = (preds == labels).float().mean()
+
+            batch_loss['total'].append(loss.item())
+            batch_loss['1'].append(loss1.item())
+            batch_loss['2'].append(loss2.item() if isinstance(loss2, torch.Tensor) else loss2)
+
+        for key in epoch_loss:
+            if len(batch_loss[key]) > 0:
+                epoch_loss[key].append(sum(batch_loss[key]) / len(batch_loss[key]))
+
+    for key in epoch_loss:
+        if len(epoch_loss[key]) > 0:
+            epoch_loss[key] = sum(epoch_loss[key]) / len(epoch_loss[key])
+
+    return model.state_dict(), epoch_loss, acc_val.item(), agg_protos_label
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FedSeProto (ECAI 2024): Semantic-Domain Feature Decoupling
+#  关键区别于 D²-FL:
+#    - 硬分割（独立编码器）vs 软门控
+#    - HSIC 互信息最小化 vs HSIC+对抗+对比
+#    - 点原型 vs 分布原型
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class FedSeProtoHeads(nn.Module):
+    """FedSeProto 语义-域解耦头"""
+
+    def __init__(self, proto_dim=256, sem_ratio=0.75):
+        super().__init__()
+        sem_dim = int(proto_dim * sem_ratio)
+        dom_dim = proto_dim - sem_dim
+        self.semantic_head = nn.Sequential(
+            nn.Linear(proto_dim, proto_dim), nn.ReLU(inplace=True),
+            nn.Linear(proto_dim, sem_dim))
+        self.domain_head = nn.Sequential(
+            nn.Linear(proto_dim, proto_dim), nn.ReLU(inplace=True),
+            nn.Linear(proto_dim, dom_dim))
+        self.sem_dim = sem_dim
+        self.dom_dim = dom_dim
+
+    def forward(self, x):
+        return self.semantic_head(x), self.domain_head(x)
+
+
+def _mi_minimization_loss(z_sem, z_dom):
+    """HSIC 互信息最小化"""
+    n = z_sem.size(0)
+    if n < 2:
+        return torch.tensor(0.0, device=z_sem.device)
+    z_sem_c = z_sem - z_sem.mean(dim=0, keepdim=True)
+    z_dom_c = z_dom - z_dom.mean(dim=0, keepdim=True)
+    cross_cov = torch.mm(z_sem_c.T, z_dom_c) / (n - 1)
+    mi_loss = torch.sum(cross_cov ** 2)
+    var_reg = F.relu(0.01 - z_sem_c.var(dim=0).mean()) + F.relu(0.01 - z_dom_c.var(dim=0).mean())
+    return mi_loss + 0.1 * var_reg
+
+
+def _update_weights_FedSeProto(self, args, idx, global_protos, model, global_round=0, ld=None):
+    """
+    FedSeProto 本地训练：语义-域解耦 + 仅共享语义原型
+
+    L = L_CE + ld * L_proto(semantic only) + mi_lambda * L_MI
+    """
+    if ld is None:
+        ld = args.ld
+    model.train()
+    epoch_loss = {'total': [], '1': [], '2': [], '3': []}
+    mi_lambda = getattr(args, 'mi_lambda', 0.05)
+    proto_dim = getattr(args, 'proto_dim', 256) or 256
+    sem_ratio = getattr(args, 'sem_ratio', 0.75)
+
+    if not hasattr(self, 'seproto_heads'):
+        self.seproto_heads = FedSeProtoHeads(proto_dim, sem_ratio).to(self.device)
+
+    if self.args.optimizer == 'sgd':
+        optimizer = torch.optim.SGD(
+            list(model.parameters()) + list(self.seproto_heads.parameters()),
+            lr=self.args.lr, momentum=0.5)
+    elif self.args.optimizer == 'adam':
+        optimizer = torch.optim.Adam(
+            list(model.parameters()) + list(self.seproto_heads.parameters()),
+            lr=self.args.lr, weight_decay=1e-4)
+
+    for iter in range(self.args.train_ep):
+        batch_loss = {'total': [], '1': [], '2': [], '3': []}
+        agg_protos_label = {}
+
+        for batch_idx, (images, label_g) in enumerate(self.trainloader):
+            images, labels = images.to(self.device), label_g.to(self.device)
+            model.zero_grad()
+            output = model(images)
+
+            logits, proto_features = output
+            z_sem, z_dom = self.seproto_heads(proto_features)
+
+            loss1 = self.criterion(logits, labels)
+            loss3 = _mi_minimization_loss(z_sem, z_dom)
+
+            loss_mse = nn.MSELoss()
+            if len(global_protos) == 0:
+                loss2 = 0 * loss1
+            else:
+                loss2 = 0.0
+                count = 0
+                for i_lbl in range(len(labels)):
+                    for lbl_idx in range(args.num_classes):
+                        if labels[i_lbl, lbl_idx] > 0 and lbl_idx in global_protos:
+                            g_val = global_protos[lbl_idx]
+                            if isinstance(g_val, tuple):
+                                g_val = g_val[0]
+                            loss2 += loss_mse(z_sem[i_lbl:i_lbl + 1], g_val.unsqueeze(0))
+                            count += 1
+                loss2 = loss2 / max(count, 1)
+
+            loss = loss1 + loss2 * ld + loss3 * mi_lambda
+            loss.backward()
+            optimizer.step()
+
+            for i_lbl in range(len(labels)):
+                for lbl_idx in range(args.num_classes):
+                    if label_g[i_lbl, lbl_idx] > 0:
+                        if lbl_idx in agg_protos_label:
+                            agg_protos_label[lbl_idx].append(z_sem[i_lbl, :].detach())
+                        else:
+                            agg_protos_label[lbl_idx] = [z_sem[i_lbl, :].detach()]
+
+            preds = (torch.sigmoid(logits) > 0.5).float()
+            acc_val = (preds == labels).float().mean()
+
+            batch_loss['total'].append(loss.item())
+            batch_loss['1'].append(loss1.item())
+            batch_loss['2'].append(loss2.item() if isinstance(loss2, torch.Tensor) else loss2)
+            batch_loss['3'].append(loss3.item() if isinstance(loss3, torch.Tensor) else loss3)
+
+        for key in epoch_loss:
+            if len(batch_loss[key]) > 0:
+                epoch_loss[key].append(sum(batch_loss[key]) / len(batch_loss[key]))
+
+    for key in epoch_loss:
+        if len(epoch_loss[key]) > 0:
+            epoch_loss[key] = sum(epoch_loss[key]) / len(epoch_loss[key])
+
+    return model.state_dict(), epoch_loss, acc_val.item(), agg_protos_label
 

@@ -1,7 +1,7 @@
-# DPP-FL 理论详解（中文版）
+# D²-FL 理论详解（中文版）
 
-> 目标：用最直白的语言，把 DPP-FL 这篇论文的每个公式、每个设计选择都说清楚。
-> 适合读者：已经知道 FL 基本概念，想深入理解 DPP-FL 为什么有效。
+> 目标：用最直白的语言，把 D²-FL 这篇论文的每个公式、每个设计选择都说清楚。
+> 适合读者：已经知道 FL 基本概念，想深入理解 D²-FL 为什么有效。
 
 ---
 
@@ -10,7 +10,7 @@
 1. [一句话概括](#1-一句话概括)
 2. [背景：联邦学习到底难在哪](#2-背景联邦学习到底难在哪)
 3. [从 FedAvg 到 FedProto 的进化](#3-从-fedavg-到-fedproto-的进化)
-4. [DPP-FL 做了什么（先看全景）](#4-dpp-fl-做了什么先看全景)
+4. [D²-FL 做了什么（先看全景）](#4-dpp-fl-做了什么先看全景)
 5. [创新一：分布原型 —— 给原型加上"置信度"](#5-创新一分布原型--给原型加上置信度)
 6. [创新二：贝叶斯融合 —— 谁的判断更靠谱就听谁的](#6-创新二贝叶斯融合--谁的判断更靠谱就听谁的)
 7. [创新三：原型解耦 —— 把"病"和"机器"分开](#7-创新三原型解耦--把病和机器分开)
@@ -26,7 +26,7 @@
 
 ## 1. 一句话概括
 
-**DPP-FL = 让联邦学习中的"全局知识"（原型）变成带有不确定性估计的高斯分布，同时把跟疾病无关的"风格信息"去掉，只共享真正有用的"语义信息"。**
+**D²-FL = 让联邦学习中的"全局知识"（原型）变成带有不确定性估计的高斯分布，同时把跟疾病无关的"风格信息"去掉，只共享真正有用的"语义信息"。**
 
 你把这个思路理解透了，所有的公式都是围绕它展开的。
 
@@ -55,7 +55,7 @@
 | **域偏移** | 不同机器拍出来的片子"风格"不一样 | 西门子 CT vs GE CT，对比度、亮度完全不同 |
 | **隐私 vs 效用** | 加了隐私保护（加噪声）后模型变差 | 差分隐私加的噪声让有用信号被淹没 |
 
-DPP-FL 的设计动机就是**同时解决这三个问题**。
+D²-FL 的设计动机就是**同时解决这三个问题**。
 
 ---
 
@@ -98,14 +98,14 @@ $$\mathcal{L}_{\text{总}} = \underbrace{\mathcal{L}_{\text{分类}}}_{\text{做
 2. **风格污染**：不同 CT 机的成像特性会混进原型里，跨医院聚合时这些风格差异被误认为语义差异
 3. **训练不稳定**：早期全局原型是噪声，却强行拉本地原型去对齐
 
-DPP-FL 就是针对这三个局限逐一改进的。
+D²-FL 就是针对这三个局限逐一改进的。
 
 ---
 
-## 4. DPP-FL 做了什么（先看全景）
+## 4. D²-FL 做了什么（先看全景）
 
 ```
-DPP-FL = FedProto 基线
+D²-FL = FedProto 基线
        + 创新1: 分布原型（点 → 高斯分布）
        + 创新2: 贝叶斯融合（简单平均 → 精度加权）
        + 创新3: 原型解耦（混在一起 → 语义/风格分离）
@@ -126,7 +126,7 @@ DPP-FL = FedProto 基线
 
 这相当于只说"这个类别的特征中心大概在这里"，没有说"我有多确定"。
 
-**DPP-FL（分布原型）**：原型 = 一个 256 维的高斯分布，每个维度都有均值和方差：
+**D²-FL（分布原型）**：原型 = 一个 256 维的高斯分布，每个维度都有均值和方差：
 
 ```
 维度 0: 均值 = 0.3,  方差 = 0.01  → "我很确定在 0.3 附近"
@@ -238,7 +238,7 @@ $$\begin{aligned}
 
 ## 7. 创新三：原型解耦 —— 把"病"和"机器"分开
 
-这是 DPP-FL 最核心、理论上最漂亮的创新。
+这是 D²-FL 最核心、理论上最漂亮的创新。
 
 ### 7.1 问题：风格污染
 
@@ -424,7 +424,7 @@ $\lambda$ 在 1.1 到 10.9 之间搜索 99 个离散值，找到使 $\varepsilon
 
 | 模式 | 类 | 对什么加噪 | 适用算法 |
 |------|-----|----------|---------|
-| 原型模式 | `DPMechProto` | $(\mu \| \log \sigma^2)$ 拼接向量 | FedProto, DPP-FL |
+| 原型模式 | `DPMechProto` | $(\mu \| \log \sigma^2)$ 拼接向量 | FedProto, D²-FL |
 | 权重模式 | `DPMechWeight` | $\mathbf{w}_{\text{本地}} - \mathbf{w}_{\text{全局}}$ 差值 | FedAvg, FedProx, FedBN, SCAFFOLD |
 
 ---
@@ -438,11 +438,11 @@ $\lambda$ 在 1.1 到 10.9 之间搜索 99 个离散值，找到使 $\varepsilon
 | **FedBN** (2021) | 权重（跳过 BN 层） | ~23M 参数 | 本地 BN 统计量 | 权重差 |
 | **SCAFFOLD** (2020) | 权重 + 控制变量 | ~46M 参数 | 梯度修正 | 权重差 |
 | **FedProto** (2022) | 点原型 256d×14 | ~3.6K 浮点 | 原型正则化 | 原型向量 |
-| **DPP-FL** | 高斯原型 $\mathcal{N}(\mu,\sigma^2)$ | ~7.2K 浮点 | 分布原型 + 贝叶斯 + 解耦 | 原型向量 |
+| **D²-FL** | 高斯原型 $\mathcal{N}(\mu,\sigma^2)$ | ~7.2K 浮点 | 分布原型 + 贝叶斯 + 解耦 | 原型向量 |
 
 **通信量比较**：
 - 权重共享方法 ≈ 23M × 4 字节 = **92 MB/轮/客户端**
-- DPP-FL ≈ 256 × 14 × 2 × 4 字节 = **28 KB/轮/客户端**
+- D²-FL ≈ 256 × 14 × 2 × 4 字节 = **28 KB/轮/客户端**
 - 差距：约 **3000 倍**
 
 ---
@@ -609,9 +609,9 @@ KL 散度是**不对称**的：$\text{KL}(q\|p) \neq \text{KL}(p\|q)$。我们�
 ### 算法选择
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `--alg` | `dppfl` | 算法：`fedavg/fedprox/fedbn/scaffold/fedproto/dppfl` |
+| `--alg` | `d2fl` | 算法：`fedavg/fedprox/fedbn/scaffold/fedproto/d2fl` |
 
-### DPP-FL 核心参数
+### D²-FL 核心参数
 | 参数 | 默认 | 作用 |
 |------|------|------|
 | `--use_distributional` | False | 用高斯分布原型（否则点原型） |
@@ -649,7 +649,7 @@ KL 散度是**不对称**的：$\text{KL}(q\|p) \neq \text{KL}(p\|q)$。我们�
 
 ### 预训练 ResNet-50 Backbone (所有算法共用)
 
-所有算法统一使用 `DPPFLResNet`：ImageNet 预训练 ResNet-50 + 原型头 + 分类头。
+所有算法统一使用 `D2FLResNet`：ImageNet 预训练 ResNet-50 + 原型头 + 分类头。
 
 ```
 Input (3, 224, 224)  ← 灰度X光片经 Grayscale(3) 转3通道
@@ -671,7 +671,7 @@ Bottleneck expansion=4，总参数量约 23M。冻结浅层 (layer1-2)、微调�
 ## 16. 系统架构
 
 ```
-DPP-FL/
+D²-FL/
 ├── exps/
 │   └── federated_main.py          ← 主入口
 ├── lib/
@@ -682,7 +682,7 @@ DPP-FL/
 │   ├── chestxray.py               ← ChestX-ray14 数据集类
 │   ├── visualize.py               ← t-SNE 原型可视化
 │   ├── models/
-│   │   └── resnet.py              ← DPPFLResNet / ResNet50 backbone
+│   │   └── resnet.py              ← D2FLResNet / ResNet50 backbone
 │   ├── dist_proto/                ← 分布原型子模块
 │   │   ├── proto_head.py          ← ProbabilisticProtoHead (μ, logvar)
 │   │   ├── losses.py              ← KL, Wasserstein, MSE 损失
@@ -709,7 +709,7 @@ federated_main.py
   │
   ├─ 构建 local_model_list[]   → 每个客户端一个 ResNet50
   │
-  └─ FedProto_taskheter() / DPPFL_taskheter()  → 主训练循环
+  └─ FedProto_taskheter() / D2FL_taskheter()  → 主训练循环
       │
       For each round:
         ├─ 采样 m = frac * K 个客户端
@@ -726,7 +726,7 @@ federated_main.py
         │
         └─ 将本轮训练权重写回 local_model_list
 
-      test_inference_new_het_lt_DPPFL()
+      test_inference_new_het_lt_D2FL()
         ├─ 不使用全局原型: sigmoid(logits) > 0.5  (per-label)
         └─ 使用全局原型: 负原型距离 → sigmoid → 二值预测 (per-label)
 ```

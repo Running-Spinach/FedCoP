@@ -1,8 +1,8 @@
-# DPP-FL: Distributional Dual-Stream Federated Pathology Representation Learning
+# D²-FL: Distributional Dual-Stream Federated Pathology Representation Learning
 
 Privacy-Preserving Medical Image Classification via Federated Prototype Learning with Distributional Prototypes and Differential Privacy.
 
-All algorithms use **ImageNet pretrained ResNet-50** backbone + **Differential Privacy** for fair comparison. Based on [FedProto (AAAI 2022)](https://arxiv.org/abs/2105.00243), this project provides **5 FL baselines** + the proposed **DPP-FL** method:
+All algorithms use **ImageNet pretrained ResNet-50** backbone + **Differential Privacy** for fair comparison. Based on [FedProto (AAAI 2022)](https://arxiv.org/abs/2105.00243), this project provides **5 FL baselines** + the proposed **D²-FL** method:
 
 ### Baselines (comparison algorithms)
 
@@ -14,13 +14,13 @@ All algorithms use **ImageNet pretrained ResNet-50** backbone + **Differential P
 | **SCAFFOLD** | Model weights + control variates | Gradient correction `g - c_i + c` + DP | ICML 2020 |
 | **FedProto** | Class prototypes (point) | Prototype regularization + nearest-neighbor + DP | AAAI 2022 |
 
-### Proposed Method: DPP-FL
+### Proposed Method: D²-FL
 
 | Algorithm | Shared Info | Key Innovation |
 |-----------|------------|----------------|
-| **DPP-FL** | Gaussian prototypes `N(mu, sigma^2)` | Distributional prototypes + Bayesian fusion + Proto EMA + Temperature scaling |
+| **D²-FL** | Gaussian prototypes `N(mu, sigma^2)` | Distributional prototypes + Bayesian fusion + Proto EMA + Temperature scaling |
 
-Key features of DPP-FL (all algorithms share pretrained backbone + DP for fairness):
+Key features of D²-FL (all algorithms share pretrained backbone + DP for fairness):
 
 - **Distributional Prototypes** — each class prototype is modeled as a Gaussian distribution `N(mu, sigma^2)`, capturing per-client uncertainty
 - **Bayesian Fusion** — precision-weighted aggregation: clients with lower variance get higher weight
@@ -60,7 +60,7 @@ The `--data_dir` flag controls the root data directory (default: `../data/`).
 ## Project Structure
 
 ```
-DPP-FL/
+D²-FL/
 ├── exps/
 │   └── federated_main.py          # Main entry point
 ├── lib/
@@ -71,7 +71,7 @@ DPP-FL/
 │   ├── chestxray.py               # ChestXray14 dataset class
 │   ├── visualize.py               # t-SNE prototype visualization
 │   ├── models/
-│   │   └── resnet.py              # DPPFLResNet / ResNet50 backbone
+│   │   └── resnet.py              # D2FLResNet / ResNet50 backbone
 │   ├── dist_proto/
 │   │   ├── proto_head.py          # ProbabilisticProtoHead (mu, logvar)
 │   │   ├── losses.py              # KL / Wasserstein / MSE distances
@@ -90,7 +90,7 @@ DPP-FL/
 
 ## Running
 
-Select the algorithm via `--alg` (default: `dppfl`). All algorithms use pretrained ResNet-50 backbone. Add `--use_dp` to enable differential privacy.
+Select the algorithm via `--alg` (default: `d2fl`). All algorithms use pretrained ResNet-50 backbone. Add `--use_dp` to enable differential privacy.
 
 ### Baselines
 ```bash
@@ -125,25 +125,25 @@ python exps/federated_main.py --alg scaffold \
     --ways 5 --shots 100 --num_users 20 --rounds 200
 ```
 
-### Proposed: DPP-FL
+### Proposed: D²-FL
 ```bash
 # 点原型模式
-python exps/federated_main.py --alg dppfl \
+python exps/federated_main.py --alg d2fl \
     --ways 5 --shots 100 --num_users 20 --rounds 200 --ld 1.0
 
 # 分布原型 (Gaussian)
-python exps/federated_main.py --alg dppfl \
+python exps/federated_main.py --alg d2fl \
     --use_distributional --dist_type kl \
     --ways 5 --rounds 200 --ld 1.0
 
 # 分布原型 + DP
-python exps/federated_main.py --alg dppfl \
+python exps/federated_main.py --alg d2fl \
     --use_distributional --dist_type wasserstein \
     --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
     --rounds 30
 
-# 完整 DPP-FL (分布原型 + DP + 温度缩放 + 动量)
-python exps/federated_main.py --alg dppfl \
+# 完整 D²-FL (分布原型 + DP + 温度缩放 + 动量)
+python exps/federated_main.py --alg d2fl \
     --use_distributional --dist_type kl \
     --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
     --proto_momentum 0.9 --temperature 0.5 --ld_warmup 50 \
@@ -155,7 +155,7 @@ python exps/federated_main.py --alg dppfl \
 ### Algorithm Selection
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--alg` | dppfl | FL algorithm: fedavg / fedprox / fedbn / scaffold / fedproto / dppfl |
+| `--alg` | d2fl | FL algorithm: fedavg / fedprox / fedbn / scaffold / fedproto / d2fl |
 
 ### Federated Learning
 | Parameter | Default | Description |
@@ -187,13 +187,13 @@ python exps/federated_main.py --alg dppfl \
 | `--iid` | 0 | Use IID split (0 = Non-IID) |
 | `--unequal` | 0 | Unequal data amounts across clients |
 
-### Prototype Learning (FedProto / DPP-FL shared)
+### Prototype Learning (FedProto / D²-FL shared)
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--ld` | 1.0 | Prototype loss weight lambda |
 | `--proto_dim` | 256 | Prototype vector dimension |
 
-### Distributional Prototypes (DPP-FL only)
+### Distributional Prototypes (D²-FL only)
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--use_distributional` | False | Enable Gaussian prototypes `N(mu, sigma^2)` |
@@ -213,13 +213,13 @@ python exps/federated_main.py --alg dppfl \
 | `--fedprox_mu` | 0.01 | FedProx | Proximal term coefficient |
 | `--scaffold_lr` | None | SCAFFOLD | Global LR (defaults to `--lr`) |
 | `--pretrained` | True | All | Use ImageNet pretrained ResNet-50 |
-| `--proto_momentum` | 0.9 | DPP-FL | Global prototype EMA momentum |
-| `--ld_warmup` | 50 | DPP-FL | Proto loss weight warmup rounds |
-| `--temperature` | 1.0 | DPP-FL | Proto inference temperature |
+| `--proto_momentum` | 0.9 | D²-FL | Global prototype EMA momentum |
+| `--ld_warmup` | 50 | D²-FL | Proto loss weight warmup rounds |
+| `--temperature` | 1.0 | D²-FL | Proto inference temperature |
 
 ## Key Features
 
-### 5 Baselines + DPP-FL Proposed Method
+### 5 Baselines + D²-FL Proposed Method
 
 All algorithms use **ImageNet pretrained ResNet-50** backbone + optional **DP** (weight-level for weight-sharing, prototype-level for prototype-sharing).
 
@@ -230,11 +230,11 @@ All algorithms use **ImageNet pretrained ResNet-50** backbone + optional **DP** 
 | **FedBN** | Weight-sharing | Weight avg (skip BN) (+ DP) | `L_BCE` |
 | **SCAFFOLD** | Weight-sharing | Weight avg + control variate (+ DP) | `L_BCE` with grad correction |
 | **FedProto** | Prototype-sharing (baseline) | Prototype averaging (+ DP on protos) | `L_BCE + lambda * MSE(proto, global_proto)` |
-| **DPP-FL** | Prototype-sharing (proposed) | Bayesian fusion (+ DP on protos) | `L_BCE + lambda * KL/Wasserstein(N_loc, N_global)` |
+| **D²-FL** | Prototype-sharing (proposed) | Bayesian fusion (+ DP on protos) | `L_BCE + lambda * KL/Wasserstein(N_loc, N_global)` |
 
-### DPP-FL vs FedProto
+### D²-FL vs FedProto
 
-| Feature | FedProto (baseline) | DPP-FL (proposed) |
+| Feature | FedProto (baseline) | D²-FL (proposed) |
 |---------|-------------------|-------------------|
 | Backbone | Pretrained ResNet-50 | Pretrained ResNet-50 |
 | Prototype type | Point vector | Gaussian `N(mu, sigma^2)` |
@@ -247,13 +247,13 @@ All algorithms use **ImageNet pretrained ResNet-50** backbone + optional **DP** 
 | Distance | MSE | KL / Wasserstein / MSE |
 
 ### Prototype Learning
-Instead of sharing model weights, FedProto and DPP-FL share **class prototypes** — feature vectors from the penultimate layer. This enables:
+Instead of sharing model weights, FedProto and D²-FL share **class prototypes** — feature vectors from the penultimate layer. This enables:
 - Communication efficiency (256-dim vectors vs millions of weights)
 - Model-heterogeneous FL support
 - Privacy preservation (raw data never leaves the client)
 
 ### Multi-label Evaluation
-Two test modes for FedProto/DPP-FL:
+Two test modes for FedProto/D²-FL:
 1. **Local model**: `sigmoid(logits) > 0.5` (only works for client's own classes)
 2. **Global prototypes**: distance to each global prototype as pseudo-logit (zero-shot for unseen classes)
 

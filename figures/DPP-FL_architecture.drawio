@@ -1,10 +1,10 @@
 <mxfile host="app.diagrams.net" agent="Claude">
-  <diagram name="DPP-FL Architecture" id="dpp-fl-arch">
+  <diagram name="D²-FL Architecture" id="dpp-fl-arch">
     <mxGraphModel dx="975" dy="632" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1300" pageHeight="1000" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-        <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontStyle=1;fontFamily=Times New Roman;" value="DPP-FL Framework Overview" vertex="1">
+        <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontStyle=1;fontFamily=Times New Roman;" value="D²-FL Framework Overview" vertex="1">
           <mxGeometry height="30" width="500" x="280" y="10" as="geometry" />
         </mxCell>
         <mxCell id="client-panel" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#333333;strokeWidth=1;dashed=1;dashPattern=4 4;" value="" vertex="1">
