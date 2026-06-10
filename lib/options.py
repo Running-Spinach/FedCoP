@@ -107,11 +107,23 @@ def args_parser():
 
     # 原型解耦参数（DPP-FL 专属，仅 DPP-FL 算法支持）
     parser.add_argument('--use_disentangle', action='store_true',
-                        help='DPP-FL: 启用原型解耦 (语义-风格分离)')
+                        help='DPP-FL: 启用增强原型解耦 (可学习门控+对抗域不变+对比语义对齐)')
     parser.add_argument('--sem_ratio', type=float, default=0.75,
-                        help='DPP-FL: 语义维度占比 (0-1, 剩余为风格维度)')
+                        help='DPP-FL: 语义维度目标占比 (0-1, 门控正则化引导)')
     parser.add_argument('--dis_lambda', type=float, default=0.05,
-                        help='DPP-FL: 解耦独立性损失权重')
+                        help='DPP-FL: 解耦独立性损失权重 (HSIC+门控熵+正交)')
+
+    # 新增损失权重参数（DPP-FL 增强版专属）
+    parser.add_argument('--cal_lambda', type=float, default=0.01,
+                        help='DPP-FL: 原型校准损失权重 (logvar ≅ log(distance))')
+    parser.add_argument('--contra_lambda', type=float, default=0.05,
+                        help='DPP-FL: 对比语义对齐损失权重 (同类拉近/异类推远)')
+    parser.add_argument('--adv_lambda', type=float, default=0.01,
+                        help='DPP-FL: 对抗域不变损失权重 (语义不应含域信息)')
+    parser.add_argument('--ent_lambda', type=float, default=0.001,
+                        help='DPP-FL: 熵正则损失权重 (防止方差坍缩)')
+    parser.add_argument('--use_per_class_temp', action='store_true', default=True,
+                        help='DPP-FL: 启用每类可学习温度参数 (默认开启)')
 
     args = parser.parse_args()
     return args

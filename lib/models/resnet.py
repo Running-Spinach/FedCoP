@@ -16,6 +16,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as tv_models
 from dist_proto import ProbabilisticProtoHead
+from dist_proto.proto_head import PerClassTemperature
+from dist_proto.disentangle import DisentangledProtoHead as EnhancedDisentangledProtoHead
 
 
 def conv1x1(in_planes, out_planes, stride=1):
@@ -196,31 +198,31 @@ class ResNet50(nn.Module):
 
 
 class DPPFLResNet(nn.Module):
-    """DPP-FL 专用模型：ImageNet 预训练 ResNet-50 + 原型头 + 分类头
+    """DPP-FL 专用模型：ImageNet 预训练 ResNet-50 + 增强原型头 + 分类头
 
-    与 FedProto 基线的关键区别：
-      - 使用 torchvision 预训练权重（ImageNet），大幅提升有限医学数据下的特征质量
-      - 仅微调 layer3/layer4 + 原型/分类头（stem + layer1/layer2 冻结）
-      - 支持分布原型 ProbabilisticProtoHead
-      - 可选原型解耦 (DisentangledProtoHead)，分离语义与风格特征
+    核心创新（相比 FedProto 基线）：
+      1. 端到端可学习分布原型 — 深度 ProtoHead 输出 N(μ, σ²)，校准初始化
+      2. 语义-风格解耦 — 可学习门控 + 对抗域不变 + 对比语义对齐
+      3. 每类自适应温度 — 端到端学习最佳推理锐度
 
     输出格式（取决于 use_distributional 和 use_disentangle）：
       - 点原型: (logits, protos)
       - 分布原型: (logits, mu, logvar)
-      - 解耦+点原型: (logits, z_sem, z_style)
-      - 解耦+分布原型: (logits, mu_sem, logvar_sem, mu_style, logvar_style)
+      - 解耦+点原型: (logits, z_sem, z_style) 或带 gate
+      - 解耦+分布原型: (logits, mu_sem, logvar_sem, mu_style, logvar_style) 或带 gate
     """
 
     def __init__(self, args):
         """
         参数:
             args: 配置对象，需包含 num_classes, proto_dim, use_distributional,
-                  use_disentangle, pretrained 等字段
+                  use_disentangle, pretrained, sem_ratio 等字段
         """
         super().__init__()
         self.num_classes = args.num_classes
         self.proto_dim = getattr(args, 'proto_dim', None) or 256
         self.use_distributional = getattr(args, 'use_distributional', False)
+        self.use_disentangle = getattr(args, 'use_disentangle', False)
 
         # ── 加载 ImageNet 预训练 ResNet-50 ──
         pretrained = getattr(args, 'pretrained', True)
@@ -235,26 +237,26 @@ class DPPFLResNet(nn.Module):
         self.layer3 = backbone.layer3
         self.layer4 = backbone.layer4
         self.avgpool = backbone.avgpool
-        self.fc_backbone = backbone.fc  # 保留引用，实际不用
+        self.fc_backbone = backbone.fc
 
         # ── 原型提取层 ──
         self.fc1 = nn.Linear(2048, self.proto_dim)
 
-        # ── 分布原型头（可选）──
+        # ── 增强分布原型头（可选）──
         if self.use_distributional:
-            self.proto_head = ProbabilisticProtoHead(self.proto_dim, proto_dim=self.proto_dim)
+            self.proto_head = ProbabilisticProtoHead(
+                self.proto_dim, proto_dim=self.proto_dim,
+                hidden_dim=self.proto_dim)
         else:
             self.proto_head = None
 
         # ── 分类头 ──
         self.fc2 = nn.Linear(self.proto_dim, self.num_classes)
 
-        # ── 原型解耦（DPP-FL 专属）──
-        self.use_disentangle = getattr(args, 'use_disentangle', False)
+        # ── 增强原型解耦（DPP-FL 专属）──
         if self.use_disentangle:
-            from dist_proto.disentangle import DisentangledProtoHead
             sem_ratio = getattr(args, 'sem_ratio', 0.75)
-            self.dis_head = DisentangledProtoHead(
+            self.dis_head = EnhancedDisentangledProtoHead(
                 proto_dim=self.proto_dim,
                 sem_ratio=sem_ratio,
                 use_distributional=self.use_distributional,
@@ -262,12 +264,24 @@ class DPPFLResNet(nn.Module):
         else:
             self.dis_head = None
 
-    def forward(self, x):
+        # ── 每类可学习温度（用于原型推理）──
+        use_per_class_temp = getattr(args, 'use_per_class_temp', True)
+        if use_per_class_temp:
+            init_temp = getattr(args, 'temperature', 1.0)
+            self.class_temp = PerClassTemperature(self.num_classes, init_temp=init_temp)
+        else:
+            self.class_temp = None
+
+    def forward(self, x, return_gate=False):
         """前向传播：预训练骨干 → fc1(原型特征) → [ProtoHead/DisHead] → fc2(分类 logits)
 
+        参数:
+            x: 输入图像 (B, C, H, W)
+            return_gate: 是否返回门控值（用于解耦正则化损失）
+
         返回:
-            解耦+分布: (logits, mu_sem, logvar_sem, mu_style, logvar_style)
-            解耦+点: (logits, z_sem, z_style)
+            解耦+分布: (logits, mu_sem, logvar_sem, mu_style, logvar_style)  [+ gate]
+            解耦+点: (logits, z_sem, z_style)  [+ gate]
             分布: (logits, mu, logvar)
             点: (logits, proto_features)
         """
@@ -282,22 +296,34 @@ class DPPFLResNet(nn.Module):
         proto_features = F.relu(self.fc1(x))  # (B, proto_dim)
 
         if self.use_disentangle and self.dis_head is not None:
-            # 解耦模式：仅共享语义原型，风格原型保留本地
-            if self.use_distributional:
-                (_mu_full, _logvar_full,
-                 mu_sem, logvar_sem,
-                 mu_style, logvar_style) = self.dis_head(proto_features)
-                logits = self.fc2(proto_features)
-                return logits, mu_sem, logvar_sem, mu_style, logvar_style
-            else:
-                _z_full, z_sem, z_style = self.dis_head(proto_features)
-                logits = self.fc2(proto_features)
-                return logits, z_sem, z_style#原始分数 logits 仍基于全维度 proto_features 计算，z_sem/z_style 仅供原型聚合和损失计算使用。
+            # 增强解耦模式：可学习门控 + 对抗域不变 + 对比语义对齐
+            result = self.dis_head(proto_features, return_gate=return_gate)
+            logits = self.fc2(proto_features)
+            return (logits,) + result
         else:
-            # 原始模式
+            # 原始分布原型模式
             logits = self.fc2(proto_features)
             if self.use_distributional and self.proto_head is not None:
                 mu, logvar = self.proto_head(proto_features)
                 return logits, mu, logvar
             else:
                 return logits, proto_features
+
+    def forward_adversarial(self, z_sem, grad_reverse_lambda=1.0):
+        """对抗域分类前向：对语义特征做梯度反转后预测域标签
+
+        用于训练时检测语义特征是否泄漏了域信息。
+        """
+        if self.dis_head is not None:
+            return self.dis_head.forward_adversarial(z_sem, grad_reverse_lambda)
+        return None
+
+    def get_class_temperatures(self, class_indices=None):
+        """获取每类可学习温度参数
+
+        返回:
+            temperatures: shape (num_classes,) 或 (len(class_indices),)
+        """
+        if self.class_temp is not None:
+            return self.class_temp(class_indices)
+        return torch.ones(self.num_classes)  # fallback: 均匀温度

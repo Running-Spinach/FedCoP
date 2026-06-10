@@ -8,6 +8,7 @@ import numpy as np              # 数值计算、数组操作
 from tqdm import tqdm           # 进度条显示
 import torch                    # 深度学习框架
 
+from lib.update import test_inference_new_het_lt_DPPFL
 from tensorboardX import SummaryWriter  # TensorBoard 日志记录
 import random                   # 随机数生成（种子设置）
 from pathlib import Path        # 跨平台路径处理
@@ -155,6 +156,10 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
     proto_momentum = getattr(args, 'proto_momentum', 0.9)
     ld_warmup = getattr(args, 'ld_warmup', 50)#原型损失权重 warmup 轮数
     temperature = getattr(args, 'temperature', 1.0)
+    cal_lambda = getattr(args, 'cal_lambda', 0.01)
+    contra_lambda = getattr(args, 'contra_lambda', 0.05)
+    adv_lambda = getattr(args, 'adv_lambda', 0.01)
+    ent_lambda = getattr(args, 'ent_lambda', 0.001)
 
     suffix = '_dis' if use_dis else '' #解耦模式后缀
     summary_writer = SummaryWriter(
@@ -190,6 +195,10 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
         idxs_users = np.random.choice(args.num_users, m, replace=False)
         proto_loss = 0
         dis_loss_sum = 0
+        cal_loss_sum = 0
+        contra_loss_sum = 0
+        adv_loss_sum = 0
+        ent_loss_sum = 0
 
         # ── 自适应原型损失权重 warmup ──
         ld = args.ld * min(1.0, (round + 1) / max(ld_warmup, 1))
@@ -208,12 +217,20 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
             local_protos[idx] = agg_protos
 
             summary_writer.add_scalar(f'Train/Loss/user{idx+1}', loss['total'], round)
-            summary_writer.add_scalar(f'Train/Loss1/user{idx+1}', loss['1'], round)
-            summary_writer.add_scalar(f'Train/Loss2/user{idx+1}', loss['2'], round)
+            summary_writer.add_scalar(f'Train/Loss1-CE/user{idx+1}', loss['1'], round)
+            summary_writer.add_scalar(f'Train/Loss2-Proto/user{idx+1}', loss['2'], round)
             summary_writer.add_scalar(f'Train/Loss3-Dis/user{idx+1}', loss['3'], round)
+            summary_writer.add_scalar(f'Train/Loss-Cal/user{idx+1}', loss.get('cal', 0), round)
+            summary_writer.add_scalar(f'Train/Loss-Contra/user{idx+1}', loss.get('contra', 0), round)
+            summary_writer.add_scalar(f'Train/Loss-Adv/user{idx+1}', loss.get('adv', 0), round)
+            summary_writer.add_scalar(f'Train/Loss-Ent/user{idx+1}', loss.get('ent', 0), round)
             summary_writer.add_scalar(f'Train/Acc/user{idx+1}', acc, round)
             proto_loss += loss['2']
             dis_loss_sum += loss['3']
+            cal_loss_sum += loss.get('cal', 0)
+            contra_loss_sum += loss.get('contra', 0)
+            adv_loss_sum += loss.get('adv', 0)
+            ent_loss_sum += loss.get('ent', 0)
 
         if use_dp:
             # 解耦模式下仅对语义原型加噪 → 语义维度更小 → DP 信噪比更高
@@ -255,10 +272,18 @@ def DPPFL_taskheter(args, train_dataset, test_dataset, user_groups,
         summary_writer.add_scalar('Train/ld', ld, round)
         if use_dis:
             summary_writer.add_scalar('Train/Loss3-Dis/mean', dis_loss_sum / len(idxs_users), round)
+        if cal_lambda > 0:
+            summary_writer.add_scalar('Train/Loss-Cal/mean', cal_loss_sum / len(idxs_users), round)
+        if contra_lambda > 0:
+            summary_writer.add_scalar('Train/Loss-Contra/mean', contra_loss_sum / len(idxs_users), round)
+        if adv_lambda > 0:
+            summary_writer.add_scalar('Train/Loss-Adv/mean', adv_loss_sum / len(idxs_users), round)
+        if ent_lambda > 0:
+            summary_writer.add_scalar('Train/Loss-Ent/mean', ent_loss_sum / len(idxs_users), round)
         train_loss.append(sum(local_losses) / len(local_losses))
 
     # ── 最终评估（带温度缩放 + 解耦感知）──
-    acc_list_l, acc_list_g, loss_list = test_inference_new_het_lt(
+    acc_list_l, acc_list_g, loss_list = test_inference_new_het_lt_DPPFL(
         args, local_model_list, test_dataset, classes_list, user_groups_lt,
         global_protos, temperature=temperature)
 

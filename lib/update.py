@@ -10,8 +10,12 @@ from pathlib import Path
 lib_dir = (Path(__file__).parent).resolve()
 if str(lib_dir) not in sys.path:
     sys.path.insert(0, str(lib_dir))
-from dist_proto.losses import distributional_proto_loss
-from dist_proto.disentangle import disentanglement_loss
+from dist_proto.losses import (distributional_proto_loss,
+                                 prototype_calibration_loss,
+                                 entropy_regularization)
+from dist_proto.disentangle import (disentanglement_loss,
+                                     contrastive_semantic_loss,
+                                     adversarial_disentanglement_loss)
 
 
 class DatasetSplit(Dataset):
@@ -341,27 +345,41 @@ class LocalUpdate(object):
         if ld is None:
             ld = args.ld
         """
-        DPP-FL: 仅共享语义原型，风格原型保留本地
+        DPP-FL 增强版本地训练：端到端分布原型 + 语义-风格解耦
+
+        损失函数（7项）：
+          L_total = L_CE            (分类)
+                  + λ    * L_proto  (分布原型对齐)
+                  + λ_dis * L_dis   (解耦独立性: HSIC + 门控熵 + 正交)
+                  + λ_cal * L_cal   (原型校准: logvar ≅ log(distance))
+                  + λ_ctr * L_contra (对比语义对齐: 同类拉近/异类推远)
+                  + λ_adv * L_adv   (对抗域不变: 语义不应含域信息)
+                  + λ_ent * L_ent   (熵正则: 防止方差坍缩)
 
         参数:
             args: 配置参数
             idx: 客户端索引
             global_protos: 全局原型字典
-            model: 当前模型
+            model: 当前模型 (DPPFLResNet)
             global_round: 全局训练轮次
 
         返回:
             model.state_dict(): 更新后的模型状态字典
-            epoch_loss: 包含total/1/2/3四类损失的字典
+            epoch_loss: 包含total/1/2/3/cal/contra/adv/ent的损失字典
             acc_val.item(): 准确率
             agg_protos_label: 聚合后的本地原型字典
         """
         model.train()
-        epoch_loss = {'total': [], '1': [], '2': [], '3': []}#只有 'total' 带了 λ 加权，'1' '2' '3' 都是原始值。
+        epoch_loss = {'total': [], '1': [], '2': [], '3': [],
+                       'cal': [], 'contra': [], 'adv': [], 'ent': []}
 
         use_dist = getattr(args, 'use_distributional', False)
         use_dis = getattr(args, 'use_disentangle', False)
         dis_lambda = getattr(args, 'dis_lambda', 0.05)
+        cal_lambda = getattr(args, 'cal_lambda', 0.01)
+        contra_lambda = getattr(args, 'contra_lambda', 0.05)
+        adv_lambda = getattr(args, 'adv_lambda', 0.01)
+        ent_lambda = getattr(args, 'ent_lambda', 0.001)
 
         if self.args.optimizer == 'sgd':
             optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,
@@ -371,24 +389,29 @@ class LocalUpdate(object):
                                          weight_decay=1e-4)
 
         for iter in range(self.args.train_ep):
-            batch_loss = {'total': [], '1': [], '2': [], '3': []}
+            batch_loss = {'total': [], '1': [], '2': [], '3': [],
+                           'cal': [], 'contra': [], 'adv': [], 'ent': []}
             agg_protos_label = {}
 
             for batch_idx, (images, label_g) in enumerate(self.trainloader):
                 images, labels = images.to(self.device), label_g.to(self.device)
 
                 model.zero_grad()
-                output = model(images)
+                # 解耦模式下请求门控值，用于门控熵正则
+                output = model(images, return_gate=use_dis)
 
                 # ── 解析模型输出 ──
+                gate = None
                 if use_dis and use_dist:
-                    # 解耦 + 分布: (logits, mu_sem, logvar_sem, mu_style, logvar_style)
-                    logits, mu_sem, logvar_sem, mu_style, logvar_style = output
+                    # 增强解耦 + 分布: (logits, mu_full, logvar_full,
+                    #                     mu_sem, logvar_sem, mu_style, logvar_style, gate)
+                    (logits, _mu_full, _logvar_full,
+                     mu_sem, logvar_sem, mu_style, logvar_style, gate) = output
                     proto_for_share = (mu_sem, logvar_sem)
                     proto_for_style = (mu_style, logvar_style)
                 elif use_dis:
-                    # 解耦 + 点原型: (logits, z_sem, z_style)
-                    logits, z_sem, z_style = output
+                    # 增强解耦 + 点原型: (logits, z_full, z_sem, z_style, gate)
+                    logits, _z_full, z_sem, z_style, gate = output
                     proto_for_share = z_sem
                     proto_for_style = z_style
                 elif use_dist:
@@ -400,22 +423,30 @@ class LocalUpdate(object):
 
                 loss1 = self.criterion(logits, labels)
 
-                # ── 解耦独立性损失 L_dis ──
+                # ── 核心创新 1: 增强解耦损失 L_dis ──
+                # HSIC 独立性 + 门控熵（可学习门控） + 正交约束
                 if use_dis:
                     if use_dist:
-                        loss3 = disentanglement_loss(mu_sem, mu_style)
+                        loss3 = disentanglement_loss(
+                            mu_sem, mu_style,
+                            gate=gate,
+                            proto_dim=getattr(args, 'proto_dim', 256) or 256
+                        )
                     else:
-                        loss3 = disentanglement_loss(z_sem, z_style)
+                        loss3 = disentanglement_loss(
+                            z_sem, z_style,
+                            gate=gate,
+                            proto_dim=getattr(args, 'proto_dim', 256) or 256
+                        )
                 else:
                     loss3 = 0.0 * loss1
 
-                # ── 原型正则化损失 L_proto ──
+                # ── 分布原型正则化损失 L_proto ──
                 loss_mse = nn.MSELoss()
                 if len(global_protos) == 0:
                     loss2 = 0 * loss1
                 else:
                     if use_dist and use_dis:
-                        # 解耦分布原型损失：仅对语义部分计算 KL/Wasserstein
                         loss2 = 0.0
                         count = 0
                         for i_lbl in range(len(labels)):
@@ -433,7 +464,6 @@ class LocalUpdate(object):
                                     count += 1
                         loss2 = loss2 / max(count, 1)
                     elif use_dis:
-                        # 解耦点原型损失：仅对语义部分计算 MSE
                         loss2 = 0.0
                         count = 0
                         for i_lbl in range(len(labels)):
@@ -444,7 +474,6 @@ class LocalUpdate(object):
                                     count += 1
                         loss2 = loss2 / max(count, 1)
                     elif use_dist:
-                        # 分布原型损失：对每张图的所有正标签计算 KL/Wasserstein
                         loss2 = 0.0
                         count = 0
                         for i_lbl in range(len(labels)):
@@ -460,7 +489,6 @@ class LocalUpdate(object):
                                     count += 1
                         loss2 = loss2 / max(count, 1)
                     else:
-                        # 点原型损失：MSE 距离（多标签：遍历所有正标签）
                         loss2 = 0.0
                         count = 0
                         for i_lbl in range(len(labels)):
@@ -471,12 +499,70 @@ class LocalUpdate(object):
                                     count += 1
                         loss2 = loss2 / max(count, 1)
 
-                loss = loss1 + loss2 * ld + loss3 * dis_lambda
+                # ── 核心创新 1+: 原型校准损失 L_cal ──
+                # 鼓励 logvar 反映与全局原型的实际距离
+                if use_dist and cal_lambda > 0 and len(global_protos) > 0:
+                    if use_dis:
+                        loss_cal = prototype_calibration_loss(
+                            mu_sem, logvar_sem, labels, global_protos,
+                            dist_type=args.dist_type, num_classes=args.num_classes
+                        )
+                    else:
+                        loss_cal = prototype_calibration_loss(
+                            mu, logvar, labels, global_protos,
+                            dist_type=args.dist_type, num_classes=args.num_classes
+                        )
+                else:
+                    loss_cal = 0.0 * loss1
+
+                # ── 核心创新 2+: 对比语义对齐损失 L_contra ──
+                # 同类语义特征在语义空间中聚集，异类分散
+                if use_dis and contra_lambda > 0:
+                    if use_dist:
+                        loss_contra = contrastive_semantic_loss(mu_sem, labels)
+                    else:
+                        loss_contra = contrastive_semantic_loss(z_sem, labels)
+                else:
+                    loss_contra = 0.0 * loss1
+
+                # ── 核心创新 2++: 对抗域不变损失 L_adv ──
+                # 语义特征经过梯度反转后不应被域分类器识别
+                if use_dis and adv_lambda > 0:
+                    if use_dist:
+                        domain_logits = model.forward_adversarial(
+                            mu_sem, grad_reverse_lambda=1.0)
+                    else:
+                        domain_logits = model.forward_adversarial(
+                            z_sem, grad_reverse_lambda=1.0)
+                    if domain_logits is not None:
+                        loss_adv = adversarial_disentanglement_loss(domain_logits)
+                    else:
+                        loss_adv = 0.0 * loss1
+                else:
+                    loss_adv = 0.0 * loss1
+
+                # ── 熵正则 L_ent：防止方差坍缩回点原型 ──
+                if use_dist and ent_lambda > 0:
+                    if use_dis:
+                        loss_ent = entropy_regularization(logvar_sem)
+                    else:
+                        loss_ent = entropy_regularization(logvar)
+                else:
+                    loss_ent = 0.0 * loss1
+
+                # ── 总损失 ──
+                loss = (loss1
+                        + loss2 * ld
+                        + loss3 * dis_lambda
+                        + loss_cal * cal_lambda
+                        + loss_contra * contra_lambda
+                        + loss_adv * adv_lambda
+                        + loss_ent * ent_lambda)
+
                 loss.backward()
                 optimizer.step()
 
-                # ── 按标签聚合本地原型 ──
-                # 解耦模式仅聚合语义原型；原始模式聚合全部原型
+                # ── 按标签聚合本地原型（解耦模式仅聚合语义原型）──
                 if use_dis:
                     if use_dist:
                         sem_feat = mu_sem
@@ -486,7 +572,7 @@ class LocalUpdate(object):
                         for lbl_idx in range(args.num_classes):
                             if label_g[i_lbl, lbl_idx] > 0:
                                 if use_dist:
-                                    proto_val = (mu_sem[i_lbl, :].detach(),
+                                    proto_val = (sem_feat[i_lbl, :].detach(),
                                                  logvar_sem[i_lbl, :].detach())
                                 else:
                                     proto_val = sem_feat[i_lbl, :].detach()
@@ -499,7 +585,8 @@ class LocalUpdate(object):
                         for lbl_idx in range(args.num_classes):
                             if label_g[i_lbl, lbl_idx] > 0:
                                 if use_dist:
-                                    proto_val = (mu[i_lbl, :].detach(), logvar[i_lbl, :].detach())
+                                    proto_val = (mu[i_lbl, :].detach(),
+                                                 logvar[i_lbl, :].detach())
                                 else:
                                     proto_val = protos[i_lbl, :].detach()
                                 if lbl_idx in agg_protos_label:
@@ -507,7 +594,7 @@ class LocalUpdate(object):
                                 else:
                                     agg_protos_label[lbl_idx] = [proto_val]
 
-                # 多标签 per-label 准确率（所有标签位置的平均匹配率）
+                # 多标签 per-label 准确率
                 preds = (torch.sigmoid(logits) > 0.5).float()
                 acc_val = (preds == labels).float().mean()
 
@@ -519,20 +606,29 @@ class LocalUpdate(object):
                         loss.item(),
                         acc_val.item()))
 
+                # 记录各损失分量
+                def _val(v):
+                    return v.item() if isinstance(v, torch.Tensor) else v
+
                 batch_loss['total'].append(loss.item())
                 batch_loss['1'].append(loss1.item())
-                batch_loss['2'].append(loss2.item())
-                batch_loss['3'].append(loss3.item() if isinstance(loss3, torch.Tensor) else loss3)
+                batch_loss['2'].append(_val(loss2))
+                batch_loss['3'].append(_val(loss3))
+                batch_loss['cal'].append(_val(loss_cal))
+                batch_loss['contra'].append(_val(loss_contra))
+                batch_loss['adv'].append(_val(loss_adv))
+                batch_loss['ent'].append(_val(loss_ent))
 
-            epoch_loss['total'].append(sum(batch_loss['total']) / len(batch_loss['total']))
-            epoch_loss['1'].append(sum(batch_loss['1']) / len(batch_loss['1']))
-            epoch_loss['2'].append(sum(batch_loss['2']) / len(batch_loss['2']))
-            epoch_loss['3'].append(sum(batch_loss['3']) / len(batch_loss['3']))
+            # ── Epoch 级别损失平均 ──
+            for key in epoch_loss:
+                if len(batch_loss[key]) > 0:
+                    epoch_loss[key].append(
+                        sum(batch_loss[key]) / len(batch_loss[key]))
 
-        epoch_loss['total'] = sum(epoch_loss['total']) / len(epoch_loss['total'])
-        epoch_loss['1'] = sum(epoch_loss['1']) / len(epoch_loss['1'])
-        epoch_loss['2'] = sum(epoch_loss['2']) / len(epoch_loss['2'])
-        epoch_loss['3'] = sum(epoch_loss['3']) / len(epoch_loss['3'])
+        # ── 全局平均 ──
+        for key in epoch_loss:
+            if len(epoch_loss[key]) > 0:
+                epoch_loss[key] = sum(epoch_loss[key]) / len(epoch_loss[key])
 
         return model.state_dict(), epoch_loss, acc_val.item(), agg_protos_label
 
@@ -709,15 +805,26 @@ def test_inference_new_het_lt_DPPFL(args, local_model_list, test_dataset, classe
     device = args.device
 
     def _extract_proto_feat(output):
-        """从模型输出中提取用于原型比对的语义特征向量"""
+        """从模型输出中提取用于原型比对的语义特征向量
+
+        增强版 DPPFLResNet 输出格式（return_gate=False）:
+          解耦+分布: (logits, mu_full, logvar_full, mu_sem, logvar_sem, mu_style, logvar_style)
+          解耦+点:   (logits, z_full, z_sem, z_style)
+          分布:      (logits, mu, logvar)
+          点:        (logits, proto_features)
+        """
         if use_dis and use_dist:
-            return output[2]   # mu_sem (5-tuple: logits, mu_sem, logvar_sem, mu_style, logvar_style)
+            # 7-tuple: output[3] = mu_sem (语义均值 → 用于原型比对)
+            return output[3]
         elif use_dis:
-            return output[1]   # z_sem (3-tuple: logits, z_sem, z_style)
+            # 4-tuple: output[2] = z_sem (语义特征 → 用于原型比对)
+            return output[2]
         elif use_dist and len(output) >= 3:
-            return output[1]   # mu (3-tuple: logits, mu, logvar)
+            # 3-tuple: output[1] = mu
+            return output[1]
         else:
-            return output[1]   # protos (2-tuple: logits, protos)
+            # 2-tuple: output[1] = proto_features
+            return output[1]
 
     acc_list_g = []
     acc_list_l = []
