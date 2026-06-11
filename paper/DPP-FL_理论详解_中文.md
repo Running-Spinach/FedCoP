@@ -10,23 +10,25 @@
 1. [一句话概括](#1-一句话概括)
 2. [背景：联邦学习到底难在哪](#2-背景联邦学习到底难在哪)
 3. [从 FedAvg 到 FedProto 的进化](#3-从-fedavg-到-fedproto-的进化)
-4. [D²-FL 做了什么（先看全景）](#4-dpp-fl-做了什么先看全景)
+4. [D²-FL 做了什么（先看全景）](#4-d²-fl-做了什么先看全景)
 5. [创新一：分布原型 —— 给原型加上"置信度"](#5-创新一分布原型--给原型加上置信度)
 6. [创新二：贝叶斯融合 —— 谁的判断更靠谱就听谁的](#6-创新二贝叶斯融合--谁的判断更靠谱就听谁的)
 7. [创新三：原型解耦 —— 把"病"和"机器"分开](#7-创新三原型解耦--把病和机器分开)
 8. [创新四：EMA 动量 —— 让全局原型别"一惊一乍"](#8-创新四ema-动量--让全局原型别一惊一乍)
 9. [创新五：λ 预热 + 温度缩放](#9-创新五λ-预热--温度缩放)
-10. [差分隐私是怎么加进去的](#10-差分隐私是怎么加进去的)
-11. [六个算法一张表对比](#11-六个算法一张表对比)
-12. [完整训练流程（伪代码）](#12-完整训练流程伪代码)
-13. [公式速查卡](#13-公式速查卡)
-14. [常见问题 FAQ](#14-常见问题-faq)
+10. [创新六：校准损失 —— 让方差说实话](#10-创新六校准损失--让方差说实话)
+11. [创新七：熵正则 —— 防止方差坍缩](#11-创新七熵正则--防止方差坍缩)
+12. [差分隐私是怎么加进去的](#12-差分隐私是怎么加进去的)
+13. [八个算法一张表对比](#13-八个算法一张表对比)
+14. [完整训练流程（伪代码）](#14-完整训练流程伪代码)
+15. [公式速查卡](#15-公式速查卡)
+16. [常见问题 FAQ](#16-常见问题-faq)
 
 ---
 
 ## 1. 一句话概括
 
-**D²-FL = 让联邦学习中的"全局知识"（原型）变成带有不确定性估计的高斯分布，同时把跟疾病无关的"风格信息"去掉，只共享真正有用的"语义信息"。**
+**D²-FL = 让联邦学习中的"全局知识"（原型）变成带有不确定性估计的高斯分布，同时把跟疾病无关的"风格信息"通过可学习门控机制分离出去，只共享真正有用的"语义信息"，并用校准、对比、对抗、熵正则等多重机制保证解耦质量和训练稳定。**
 
 你把这个思路理解透了，所有的公式都是围绕它展开的。
 
@@ -98,7 +100,17 @@ $$\mathcal{L}_{\text{总}} = \underbrace{\mathcal{L}_{\text{分类}}}_{\text{做
 2. **风格污染**：不同 CT 机的成像特性会混进原型里，跨医院聚合时这些风格差异被误认为语义差异
 3. **训练不稳定**：早期全局原型是噪声，却强行拉本地原型去对齐
 
-D²-FL 就是针对这三个局限逐一改进的。
+D²-FL 就是针对这些局限逐一改进的。
+
+### 3.3 新增 Baseline：FedGMKD、FedBCS、FedSeProto
+
+除了经典的五种 baseline（FedAvg、FedProx、FedBN、SCAFFOLD、FedProto），本项目还实现了三种最新的原型类联邦学习方法用于公平对比：
+
+| Baseline | 会议 | 核心思路 |
+|----------|------|---------|
+| **FedGMKD** | NeurIPS 2024 | 用 GMM（高斯混合模型，EM 算法拟合）代替单点原型，通过"差异感知"聚合（质量 = 1/平均方差）加权融合 |
+| **FedBCS** | AAAI 2026 | 频域风格重校准：通过类似 InstanceNorm 的 1D 特征重校准，消除跨客户端风格差异后再计算原型 |
+| **FedSeProto** | ECAI 2024 | 硬分割语义-域双分支 MLP + HSIC 互信息最小化，将原型拆成语义和域两部分，仅共享语义 |
 
 ---
 
@@ -109,8 +121,16 @@ D²-FL = FedProto 基线
        + 创新1: 分布原型（点 → 高斯分布）
        + 创新2: 贝叶斯融合（简单平均 → 精度加权）
        + 创新3: 原型解耦（混在一起 → 语义/风格分离）
+                ├── 可学习门控 (LearnableGate)：软分配替代硬切割
+                ├── HSIC 独立性约束：统计去相关
+                ├── 门控熵正则：鼓励 0/1 决策
+                ├── 正交约束：防止信息泄露
+                ├── 对抗域不变性：梯度反转欺骗域分类器
+                └── 对比语义对齐：InfoNCE 聚类同病特征
        + 创新4: EMA 动量（骤变 → 平滑更新）
-       + 创新5: λ预热 + 温度缩放（常数 → 自适应）
+       + 创新5: λ预热 + 逐类温度缩放（常数 → 自适应）
+       + 创新6: 校准损失（让方差真实反映不确定性）
+       + 创新7: 熵正则（防止方差坍缩回点原型）
        + 可选:  差分隐私保护
 ```
 
@@ -143,15 +163,15 @@ D²-FL = FedProto 基线
 
 ```
 fc1 输出 (256维)
-    ├── Linear(256→256) → 均值 μ
-    └── Linear(256→256) → clamp(-10, 10) → 对数方差 log(σ²)
+    ├── Linear(256→256) → ReLU → LayerNorm → Linear(256→256) → 均值 μ
+    └── Linear(256→256) → ReLU → LayerNorm → Linear(256→256) → clamp(-10, 10) → 对数方差 log(σ²)
 ```
 
 公式：
 
 $$\begin{aligned}
-\boldsymbol{\mu} &= \mathbf{W}_\mu \cdot \mathbf{h} + \mathbf{b}_\mu \\[4pt]
-\log \boldsymbol{\sigma}^2 &= \operatorname{clamp}_{[-10,10]}(\mathbf{W}_\sigma \cdot \mathbf{h} + \mathbf{b}_\sigma)
+\boldsymbol{\mu} &= \mathbf{W}_{\mu 2} \cdot \operatorname{LayerNorm}(\operatorname{ReLU}(\mathbf{W}_{\mu 1} \cdot \mathbf{h} + \mathbf{b}_{\mu 1})) + \mathbf{b}_{\mu 2} \\[4pt]
+\log \boldsymbol{\sigma}^2 &= \operatorname{clamp}_{[-10,10]}(\mathbf{W}_{\sigma 2} \cdot \operatorname{LayerNorm}(\operatorname{ReLU}(\mathbf{W}_{\sigma 1} \cdot \mathbf{h} + \mathbf{b}_{\sigma 1})) + \mathbf{b}_{\sigma 2})
 \end{aligned}$$
 
 `clamp` 的作用：防止方差爆炸（$\sigma^2$ 可以到 $e^{10} \approx 22000$）或退化到 0（$e^{-10} \approx 0.000045$）。
@@ -238,7 +258,7 @@ $$\begin{aligned}
 
 ## 7. 创新三：原型解耦 —— 把"病"和"机器"分开
 
-这是 D²-FL 最核心、理论上最漂亮的创新。
+这是 D²-FL 最核心、理论上最漂亮的创新。当前实现比原始设计更加完善，包含**六个互补子机制**。
 
 ### 7.1 问题：风格污染
 
@@ -253,28 +273,34 @@ $$\begin{aligned}
 
 这些差异会混进原型向量里。当原型跨医院聚合时，来自 GE 机器的"风格"会被当成疾病特征，污染全局原型。
 
-### 7.2 核心思路
+### 7.2 核心思路：可学习门控替代硬切割
 
-**把原型拆成两个独立的部分**：
+**旧设计**（已废弃）：硬切分维度 — 前 192 维 = 语义，后 64 维 = 风格。
+
+**新设计**（当前实现）：**可学习门控（LearnableGate）** — 网络自己学习每个维度应该归语义还是风格。
 
 ```
-原原型 (256维)
-  ├── 语义部分 (前 192维 = 75%)：编码疾病特征 → 共享到服务器
-  └── 风格部分 (后 64维  = 25%)：编码机器特征 → 留在本地
+fc1 输出 h (256维)
+    │
+    ├── gate = sigmoid(Linear(h))  →  (256维) 每维一个 [0,1] 软门控值
+    │
+    ├── z_sem  = gate ⊙ h           →  语义特征（门控接近1的维度）
+    └── z_style = (1 - gate) ⊙ h    →  风格特征（门控接近0的维度）
+
+分类: logits = fc2(concat(z_sem, z_style))   ← 分类时两部分都用
+上传: 只传 z_sem                                ← 风格特征 100% 留在本地
 ```
 
-- **语义**：病灶的形状、纹理、位置 → 不管在哪台机器上拍，肺炎就是肺炎
-- **风格**：对比度、亮度、噪声模式 → GE 和西门子不一样，但跟疾病无关
+**门控的物理含义**：
+- gate[j] ≈ 1.0 → 第 j 维是"疾病语义"特征（病灶形状、纹理、位置）→ 跨医院一致 → 上传
+- gate[j] ≈ 0.0 → 第 j 维是"成像风格"特征（对比度、亮度、噪声模式）→ 各医院不同 → 本地保留
+- gate[j] ≈ 0.5 → 该维度尚未确定归属（训练早期或模糊维度）
 
-**分类时两部分都用**（`logits = fc2([语义, 风格])`），但**上传时只传语义**。
-
-### 7.3 怎么保证真的"解耦"了
-
-光切分维度不够，因为网络可能把风格信息藏进语义维度里。需要**强制两部分统计独立**。
+### 7.3 子机制一：HSIC 独立性约束
 
 **HSIC（Hilbert-Schmidt Independence Criterion）**，用线性核的简化版：
 
-$$\boxed{\mathcal{L}_{\text{dis}} = \|\operatorname{Cov}(\mathbf{z}_{\text{sem}}, \mathbf{z}_{\text{style}})\|_F^2}$$
+$$\boxed{\mathcal{L}_{\text{HSIC}} = \|\operatorname{Cov}(\mathbf{z}_{\text{sem}}, \mathbf{z}_{\text{style}})\|_F^2}$$
 
 **逐行解释**：
 
@@ -283,46 +309,79 @@ $$\boxed{\mathcal{L}_{\text{dis}} = \|\operatorname{Cov}(\mathbf{z}_{\text{sem}}
 3. 取 Frobenius 范数的平方（= 所有矩阵元素的平方和）
 
 **结果**：
-- 如果语义和风格完全独立 → 交叉协方差 ≈ 零矩阵 → $\mathcal{L}_{\text{dis}} \approx 0$
-- 如果存在相关性 → $\mathcal{L}_{\text{dis}} > 0$ → 梯度会惩罚这种相关性
+- 如果语义和风格完全独立 → 交叉协方差 ≈ 零矩阵 → $\mathcal{L}_{\text{HSIC}} \approx 0$
+- 如果存在相关性 → $\mathcal{L}_{\text{HSIC}} > 0$ → 梯度会惩罚这种相关性
 
-**辅助正则**：防止网络偷懒把所有特征都设成 0
+### 7.4 子机制二：门控熵正则
 
-$$\mathcal{L}_{\text{var\_reg}} = \operatorname{ReLU}(0.01 - \operatorname{Var}(\mathbf{z}_{\text{sem}})) + \operatorname{ReLU}(0.01 - \operatorname{Var}(\mathbf{z}_{\text{style}}))$$
+**问题**：gate ∈ [0,1] 是可微的软门控。如果 gate 长期停留在 0.5 附近，语义和风格的分离就不彻底。
 
-**总解耦损失**：
+**方案**：二值熵正则，把门控推向 0 或 1：
 
-$$\mathcal{L}_{\text{解耦}} = \|\operatorname{Cov}(\mathbf{z}_{\text{sem}}, \mathbf{z}_{\text{style}})\|_F^2 + 0.1 \cdot \mathcal{L}_{\text{var\_reg}}$$
+$$\boxed{\mathcal{L}_{\text{gate}} = -\frac{1}{d}\sum_{j=1}^{d} \left[ g_j \log g_j + (1 - g_j) \log(1 - g_j) \right]}$$
 
-### 7.4 完整训练损失（解耦 + 分布原型模式）
+- gate = 0.5 → 熵最大 → 惩罚最大
+- gate = 0 或 1 → 熵为零 → 无惩罚
 
-$$\boxed{\mathcal{L}_{\text{总}} = \underbrace{\mathcal{L}_{\text{BCE}}}_{\text{诊断分类}} + \lambda \cdot \underbrace{\mathcal{L}_{\text{proto}}^{\text{sem}}}_{\text{语义原型对齐}} + \lambda_{\text{dis}} \cdot \underbrace{\mathcal{L}_{\text{解耦}}}_{\text{语义/风格独立}}}$$
+### 7.5 子机制三：正交约束
 
-**逐个解释**：
-- **$\mathcal{L}_{\text{BCE}}$**：多标签分类损失，用完整的 [语义, 风格] → 分类头需要两种信息
-- **$\mathcal{L}_{\text{proto}}^{\text{sem}}$**：只对**语义部分**计算与全局原型的距离 → 风格不参与全局对齐
-- **$\mathcal{L}_{\text{解耦}}$**：HSIC 独立性约束 → 强制两部分编码不同的信息
+**问题**：即使 HSIC 很低，如果语义和风格向量恰好正交（内积为零），信息仍可能通过某种非线性变换泄露。直接约束 L2 归一化后的内积为零可以进一步加固。
 
-### 7.5 解耦 + DP 的协同效应（论文核心卖点）
+$$\boxed{\mathcal{L}_{\text{orth}} = \|\mathbf{Z}_{\text{sem}}^{\text{norm}} \cdot \mathbf{Z}_{\text{style}}^{\text{norm},T}\|_F^2}$$
+
+其中 $\mathbf{Z}^{\text{norm}}$ 是沿特征维度做 L2 归一化后的特征矩阵。
+
+### 7.6 子机制四：对抗域不变性
+
+**动机**：光靠统计独立性（HSIC）还不够。网络可能学会"表面独立但深度语义中仍编码了域信息"。我们需要一个"域分类器"来检测语义特征是否仍包含域信息——如果有，就反向惩罚。
+
+**实现**：梯度反转层（Gradient Reversal Layer, GRL）+ 域分类器：
+
+```
+z_sem (256维)
+    │
+    ├── Gradient Reversal (前向不变，反向乘 -λ_adv)
+    │   └── DomainClassifier: Linear(128) → ReLU → Linear(1) → Sigmoid
+    │       └── 预测: 这个特征来自哪个客户端（域）？
+    │
+    └── 对抗损失 L_adv = BCE(域预测, 均匀分布)
+        （不是预测正确域，而是预测"均匀分布"——即无法区分域）
+```
+
+$$\boxed{\mathcal{L}_{\text{adv}} = -\sum_{k=1}^{K} \frac{1}{K} \log \hat{y}_k^{\text{domain}}}$$
+
+其中目标不是真实域标签，而是**均匀分布**（每个域等概率）。这样训练的结果是：语义特征变得"域无关"——域分类器无法判断它来自哪个医院。
+
+### 7.7 子机制五：对比语义对齐
+
+**动机**：HSIC 和对抗训练保证了"语义和风格分离"且"语义不含域信息"，但没有保证"语义特征确实编码了疾病信息"。对比损失让**同类疾病**的语义特征聚在一起，**不同类疾病**的语义特征分开。
+
+**实现**：基于多标签 Jaccard 相似度的 InfoNCE 损失：
+
+$$\boxed{\mathcal{L}_{\text{contra}} = -\log \frac{\sum_{j \in \mathcal{P}_i} \exp(\text{sim}(\mathbf{z}_i^{\text{sem}}, \mathbf{z}_j^{\text{sem}}) / \tau_c)}{\sum_{j \neq i} \exp(\text{sim}(\mathbf{z}_i^{\text{sem}}, \mathbf{z}_j^{\text{sem}}) / \tau_c)}}$$
+
+其中正样本对的条件是 **Jaccard 相似度 > 0.5**（两个样本共享至少一半的正标签）。$\tau_c$ 是对比温度（通常为 0.07）。
+
+### 7.8 总解耦损失
+
+$$\boxed{\mathcal{L}_{\text{解耦}} = \underbrace{\|\operatorname{Cov}(\mathbf{z}_{\text{sem}}, \mathbf{z}_{\text{style}})\|_F^2}_{\text{HSIC 独立性}} + \lambda_g \cdot \underbrace{\mathcal{L}_{\text{gate}}}_{\text{门控熵}} + \lambda_o \cdot \underbrace{\mathcal{L}_{\text{orth}}}_{\text{正交约束}}}$$
+
+### 7.9 解耦 + DP 的协同效应（论文核心卖点）
 
 | | 不解耦 | 解耦 |
 |---|---|---|
-| 上传向量维度 | 256 | 192（75%） |
+| 上传向量维度 | 256 | 约 192（gate 稀疏后实际有效维度） |
 | 内容 | 语义 + 风格混合 | 纯语义 |
 | 风格噪声 | 跨客户端随机波动 → 污染全局 | 零（风格不上传） |
 | DP 噪声打在 | 混合信号上 | 纯语义信号上 |
 
 **命题 1（聚合方差上界）**：Non-IID 程度为 $\eta$ 时，解耦后语义原型的聚合方差上界降至原始的 $\alpha^2$ 倍。
 
-$\alpha = 0.75$ → 方差上界降至原来的 56%。
-
 **命题 2（DP 信噪比）**：相同 $\varepsilon$ 预算下，信噪比提升：
 
-$$\boxed{\frac{\text{SNR}_{\text{解耦}}}{\text{SNR}_{\text{原始}}} = \left(\frac{d_{\text{sem}}}{d_{\text{proto}}}\right)^{-1/2} = \left(\frac{192}{256}\right)^{-1/2} \approx 1.15}$$
+$$\boxed{\frac{\text{SNR}_{\text{解耦}}}{\text{SNR}_{\text{原始}}} = \left(\frac{d_{\text{sem}}}{d_{\text{proto}}}\right)^{-1/2} \approx 1.15}$$
 
-**为什么**：DP 高斯噪声 $\mathcal{N}(0, \sigma^2 C^2 \mathbf{I}_d)$ 在 $d$ 维空间中的期望 L2 范数 $\propto \sqrt{d}$。维度从 256 降到 192，噪声减少 $\sqrt{192/256} \approx 0.866$，等效信噪比提升 $1/0.866 \approx 1.15$ 倍。
-
-**实际含义**：在 $\varepsilon = 1$ 这种极低隐私预算下，解耦带来的信噪比提升可能决定模型是可用的还是随机的。
+**为什么**：DP 高斯噪声 $\mathcal{N}(0, \sigma^2 C^2 \mathbf{I}_d)$ 在 $d$ 维空间中的期望 L2 范数 $\propto \sqrt{d}$。维度降低，噪声减小，等效信噪比提升。
 
 ---
 
@@ -330,7 +389,7 @@ $$\boxed{\frac{\text{SNR}_{\text{解耦}}}{\text{SNR}_{\text{原始}}} = \left(\
 
 ### 8.1 问题
 
-每轮只有部分客户端参与（`--frac` 默认 0.04，即 20 个客户端中每轮只采样 1 个）。如果某轮恰好抽到一个数据质量差的客户端，全局原型可能剧烈波动。
+每轮只有部分客户端参与（`--frac` 默认 0.25，即 20 个客户端中每轮采样 5 个）。如果某轮恰好抽到一个数据质量差的客户端，全局原型可能剧烈波动。
 
 ### 8.2 公式
 
@@ -356,11 +415,15 @@ $$\boxed{\lambda_{\text{eff}}(t) = \lambda \cdot \min\left(1, \frac{t + 1}{W}\ri
 
 $W = 50$（`--ld_warmup`）→ 前 50 轮 $\lambda$ 从 0 线性增至 $\lambda$。
 
-### 9.2 温度缩放：控制预测的"自信程度"
+### 9.2 逐类温度缩放：控制预测的"自信程度"
 
-推理时，用原型距离作为分类分数：
+推理时，用原型距离作为分类分数。D²-FL 支持**逐类可学习温度**（`PerClassTemperature`）：
 
-$$\boxed{\text{logit}_j(\mathbf{x}) = -\frac{\operatorname{dist}(\mathbf{p}_{\mathbf{x}}, \mathbf{G}[j])}{T}}$$
+$$\boxed{\text{logit}_j(\mathbf{x}) = -\frac{\operatorname{dist}(\mathbf{p}_{\mathbf{x}}, \mathbf{G}[j])}{T_j}}$$
+
+$T_j$ 是第 $j$ 类的可学习温度参数，初始化为 $\log(1.0) = 0$（即温度 = 1.0）。每类的"最佳温度"可能不同——数据多的常见病可能需要更低的温度（更自信），罕见病可能需要更高的温度（更保守）。
+
+也可以通过 `--temperature` 设置全局固定温度（此时不使用逐类温度）。
 
 | $T$ | 效果 | 什么时候用 |
 |-----|------|-----------|
@@ -376,9 +439,54 @@ $$\operatorname{dist}(\mathbf{p}, \mathcal{N}(\boldsymbol{\mu}_g, \boldsymbol{\s
 
 ---
 
-## 10. 差分隐私是怎么加进去的
+## 10. 创新六：校准损失 —— 让方差说实话
 
-### 10.1 核心机制
+### 10.1 问题
+
+分布原型的方差 $\sigma^2$ 是网络自由输出的。网络可能学会"作弊"：给所有样本都输出很小的方差（看起来很确定），但实际上预测不准。这就叫**方差和实际误差不匹配**。
+
+### 10.2 设计思路
+
+我们希望方差真实反映预测的不确定性：如果本地均值 $\mu$ 和全局均值 $\mu_g$ 相差很远，方差应该大；如果很近，方差应该小。
+
+**校准损失**（Huber 鲁棒回归）：
+
+$$\boxed{\mathcal{L}_{\text{cal}} = \operatorname{Huber}\left(\operatorname{mean}(|\log \sigma^2 - \log \|\boldsymbol{\mu} - \boldsymbol{\mu}_g\|^2|),\; \delta=0.5\right)}$$
+
+**逐项解释**：
+- $\|\boldsymbol{\mu} - \boldsymbol{\mu}_g\|^2$：本地均值与全局均值的真实距离（目标方差）
+- $\log \sigma^2$：网络预测的对数方差
+- 两者的差值：方差有没有"说实话"
+- Huber loss（$\delta=0.5$）：比 MSE 更鲁棒，不会被异常值主导
+- 权重 $\lambda_{\text{cal}} = 0.01$：辅助正则项，不主导训练
+
+---
+
+## 11. 创新七：熵正则 —— 防止方差坍缩
+
+### 11.1 问题
+
+在分布原型学习中，有一个天然的退化方向：
+
+$$\log \sigma^2 \to -\infty \quad\Rightarrow\quad \sigma^2 \to 0 \quad\Rightarrow\quad \text{高斯原型退化成点原型}$$
+
+一旦方差坍缩为 0，创新一（分布原型）和创新二（贝叶斯融合）的优势全部消失。
+
+### 11.2 公式
+
+$$\boxed{\mathcal{L}_{\text{ent}} = \operatorname{mean}(-\log \sigma^2)}$$
+
+- 当 $\sigma^2 \to 0$ 时（$\log \sigma^2 \to -\infty$），$-\log \sigma^2 \to +\infty$，形成强力惩罚
+- 当 $\sigma^2$ 合理大时，惩罚很小
+- 本质是**最大化高斯分布的熵**，鼓励模型保留合理的不确定性
+
+**权重极小**（$\lambda_{\text{ent}} = 0.001$），仅在分布原型模式下生效。只用于防止退化，不主导训练。
+
+---
+
+## 12. 差分隐私是怎么加进去的
+
+### 12.1 核心机制
 
 无论是原型还是权重，在上传前都经过两步：
 
@@ -392,7 +500,7 @@ $$\boxed{\mathbf{v}_{\text{裁剪}} = \mathbf{v} \cdot \min\left(1, \frac{C}{\|\
 
 $$\boxed{\mathbf{v}_{\text{加噪}} = \mathbf{v}_{\text{裁剪}} + \mathcal{N}(\mathbf{0}, \sigma^2 C^2 \mathbf{I})}$$
 
-### 10.2 噪声强度 $\sigma$ 怎么定
+### 12.2 噪声强度 $\sigma$ 怎么定
 
 通过**二分搜索**找到满足 $(\varepsilon, \delta)$ 目标的 $\sigma$：
 
@@ -400,7 +508,7 @@ $$\sigma^* = \underset{\sigma}{\operatorname{argmin}} \; |\varepsilon_{\text{实
 
 $\varepsilon$ 越小 → $\sigma$ 越大 → 噪声越大 → 隐私越强但效用越低。
 
-### 10.3 跨轮隐私预算追踪（RDP Moments Accountant）
+### 12.3 跨轮隐私预算追踪（RDP Moments Accountant）
 
 **问题**：每轮都加噪声，隐私预算会累积。$T$ 轮后总隐私损失是多少？
 
@@ -420,16 +528,16 @@ $$\boxed{\varepsilon = \min_{\lambda > 1} \left[ \varepsilon_{\text{RDP}}^{\text
 
 $\lambda$ 在 1.1 到 10.9 之间搜索 99 个离散值，找到使 $\varepsilon$ 最小的 $\lambda$。
 
-### 10.4 两种 DP 模式
+### 12.4 两种 DP 模式
 
 | 模式 | 类 | 对什么加噪 | 适用算法 |
 |------|-----|----------|---------|
-| 原型模式 | `DPMechProto` | $(\mu \| \log \sigma^2)$ 拼接向量 | FedProto, D²-FL |
+| 原型模式 | `DPMechProto` | $(\mu \| \log \sigma^2)$ 拼接向量 | FedProto, FedGMKD, FedBCS, FedSeProto, D²-FL |
 | 权重模式 | `DPMechWeight` | $\mathbf{w}_{\text{本地}} - \mathbf{w}_{\text{全局}}$ 差值 | FedAvg, FedProx, FedBN, SCAFFOLD |
 
 ---
 
-## 11. 六个算法一张表对比
+## 13. 八个算法一张表对比
 
 | 算法 | 共享什么 | 一次传多少 | Non-IID 怎么处理 | DP 对什么加噪 |
 |------|---------|-----------|-----------------|-------------|
@@ -438,7 +546,10 @@ $\lambda$ 在 1.1 到 10.9 之间搜索 99 个离散值，找到使 $\varepsilon
 | **FedBN** (2021) | 权重（跳过 BN 层） | ~23M 参数 | 本地 BN 统计量 | 权重差 |
 | **SCAFFOLD** (2020) | 权重 + 控制变量 | ~46M 参数 | 梯度修正 | 权重差 |
 | **FedProto** (2022) | 点原型 256d×14 | ~3.6K 浮点 | 原型正则化 | 原型向量 |
-| **D²-FL** | 高斯原型 $\mathcal{N}(\mu,\sigma^2)$ | ~7.2K 浮点 | 分布原型 + 贝叶斯 + 解耦 | 原型向量 |
+| **FedGMKD** (2024) | GMM 原型 3成分×256d×14 | ~11K 浮点 | GMM + 差异感知聚合 | 原型向量 |
+| **FedBCS** (2026) | 频域校准原型 256d×14 | ~3.6K 浮点 | 频域风格重校准 | 原型向量 |
+| **FedSeProto** (2024) | 语义原型 128d×14 | ~1.8K 浮点 | HSIC MI 最小化 + 语义/域分离 | 原型向量 |
+| **D²-FL** | 高斯原型 $\mathcal{N}(\mu,\sigma^2)$ | ~7.2K 浮点 | 分布原型 + 贝叶斯 + 解耦 + 对抗 + 对比 + 校准 + 熵正则 | 原型向量 |
 
 **通信量比较**：
 - 权重共享方法 ≈ 23M × 4 字节 = **92 MB/轮/客户端**
@@ -447,7 +558,7 @@ $\lambda$ 在 1.1 到 10.9 之间搜索 99 个离散值，找到使 $\varepsilon
 
 ---
 
-## 12. 完整训练流程（伪代码）
+## 14. 完整训练流程（伪代码）
 
 ```
 初始化：
@@ -464,19 +575,39 @@ $\lambda$ 在 1.1 到 10.9 之间搜索 99 个离散值，找到使 $\varepsilon
         1. 用深拷贝的上一轮模型 + 全局原型 G 在本地数据上训练：
 
            对每个 batch：
-              前向传播 → 得到 logits + 原型向量
-              损失 = BCE(分类) + λ_有效 × 原型损失 + λ_dis × 解耦损失
+              前向传播 → 得到 logits + 原型向量 + [门控值 + 语义 + 风格]
+              损失 = BCE(分类)
+                   + λ_有效 × 原型损失（对语义部分）
+                   + λ_dis × 解耦损失（HSIC + 门控熵 + 正交）
+                   + λ_cal × 校准损失
+                   + λ_contra × 对比语义对齐
+                   + λ_adv × 对抗域不变性
+                   + λ_ent × 熵正则
 
               原型损失计算（多标签）：
-                  对每张图的所有正标签，计算本地原型和对应全局原型的距离
+                  对每张图的所有正标签，计算本地语义原型和对应全局原型的距离
                   （分布原型用 KL/Wasserstein，点原型用 MSE）
 
-              解耦损失（如启用）：
-                  HSIC = 交叉协方差矩阵的 F 范数平方 + 方差正则
+              解耦损失：
+                  HSIC = 交叉协方差矩阵的 F 范数平方
+                  门控熵 = -g*log(g) - (1-g)*log(1-g)
+                  正交约束 = ||Z_norm_sem @ Z_norm_style^T||_F^2
+
+              对抗损失：
+                  梯度反转 → 域分类器 → BCE(预测, 均匀分布)
+
+              对比损失：
+                  InfoNCE，正样本对 = Jaccard 相似度 > 0.5
+
+              校准损失：
+                  Huber(|logvar_mean - log(||mu - global_mu||^2)|, δ=0.5)
+
+              熵正则：
+                  -logvar.mean()
 
               反向传播 → 更新模型参数
 
-              按标签收集本地原型（解耦模式只收集语义部分）
+              按标签收集本地语义原型（风格原型不上传）
 
         2. 客户端内原型聚合：
               同一客户端同标签多个原型 → agg_func()
@@ -507,17 +638,19 @@ $\lambda$ 在 1.1 到 10.9 之间搜索 99 个离散值，找到使 $\varepsilon
 
 ---
 
-## 13. 公式速查卡
+## 15. 公式速查卡
 
-### 损失函数
+### 损失函数（完整 7 项）
 
-| 名称 | 公式 | 用途 |
-|------|------|------|
-| 多标签 BCE | $-\sum_c [y_c\log\sigma(f_c) + (1-y_c)\log(1-\sigma(f_c))]$ | 分类 |
-| 点原型损失 | $\|\mathbf{p} - \mathbf{G}[c]\|^2$ | 知识迁移 |
-| KL 散度 | $\frac{1}{2}[\log\frac{\sigma_p^2}{\sigma_q^2} + \frac{\sigma_q^2+(\mu_q-\mu_p)^2}{\sigma_p^2} - 1]$ | 分布距离 |
-| W2 距离 | $\|\mu_q-\mu_p\|^2 + \|\sigma_q-\sigma_p\|_F^2$ | 分布距离 |
-| 解耦损失 | $\|\operatorname{Cov}(\mathbf{z}_{\text{sem}}, \mathbf{z}_{\text{style}})\|_F^2 + 0.1 \cdot \text{var\_reg}$ | 独立性 |
+| 名称 | 符号 | 公式 | 用途 |
+|------|------|------|------|
+| 多标签 BCE | $\mathcal{L}_{\text{BCE}}$ | $-\sum_c [y_c\log\sigma(f_c) + (1-y_c)\log(1-\sigma(f_c))]$ | 分类 |
+| 原型距离 | $\mathcal{L}_{\text{proto}}$ | KL / Wasserstein / MSE(本地原型, 全局原型) | 知识迁移 |
+| 解耦独立性 | $\mathcal{L}_{\text{dis}}$ | $\|\operatorname{Cov}(\mathbf{z}_{\text{sem}}, \mathbf{z}_{\text{style}})\|_F^2 + \mathcal{L}_{\text{gate}} + \mathcal{L}_{\text{orth}}$ | 语义/风格分离 |
+| 校准损失 | $\mathcal{L}_{\text{cal}}$ | $\operatorname{Huber}(\|\log\sigma^2 - \log\|\mu-\mu_g\|^2\|, \delta=0.5)$ | 方差校准 |
+| 对比对齐 | $\mathcal{L}_{\text{contra}}$ | InfoNCE, 正样本: Jaccard > 0.5 | 语义聚类 |
+| 对抗域不变 | $\mathcal{L}_{\text{adv}}$ | BCE(GRL(域分类器), 均匀分布) | 域无关语义 |
+| 熵正则 | $\mathcal{L}_{\text{ent}}$ | $\operatorname{mean}(-\log\sigma^2)$ | 防方差坍缩 |
 
 ### 聚合公式
 
@@ -549,7 +682,7 @@ $\lambda$ 在 1.1 到 10.9 之间搜索 99 个离散值，找到使 $\varepsilon
 
 ---
 
-## 14. 常见问题 FAQ
+## 16. 常见问题 FAQ
 
 ### Q1: 为什么用 KL 散度而不用 JS 散度？
 
@@ -560,15 +693,35 @@ KL 散度是**不对称**的：$\text{KL}(q\|p) \neq \text{KL}(p\|q)$。我们�
 
 这种**自适应加权**是 JS 散度做不到的。
 
-### Q2: 解耦为什么是 75%/25% 的维度比？
+### Q2: 可学习门控和硬切割有什么区别？
 
-`sem_ratio=0.75` 是一个经验值。理论上：
-- **太高**（如 0.9）→ 风格维度太少，可能不能有效编码风格信息 → 信息泄露到语义
-- **太低**（如 0.5）→ 语义维度太少，可能不能有效编码疾病特征 → 分类性能下降
+**硬切割**（旧设计）：前 192 维强制为语义，后 64 维强制为风格。问题是——网络可能把关键语义信息藏在"风格"维度里，也可能把风格噪声混进"语义"维度里。
 
-75% 在实验中取得了分类性能和隐私效用的最佳平衡。这可以作为一个超参数在实验中调优。
+**可学习门控**（当前实现）：网络自己通过 sigmoid 门学习每个维度的归属。配合门控熵正则（推向 0/1）和 HSIC 独立性约束，网络可以在训练中自动发现哪些维度编码了疾病信息（gate → 1）、哪些编码了机器信息（gate → 0）。
 
-### Q3: 分布原型会不会让通信量翻倍？
+### Q3: 为什么需要六个机制来解耦？一个不够吗？
+
+每个机制解决不同的问题：
+- **HSIC**：统计独立性（相关性为零）
+- **门控熵**：防止门控永远停在 0.5（模糊状态）
+- **正交约束**：防止非线性信息泄露（即使表面不相关）
+- **对抗域不变**：防止语义特征暗含域信息
+- **对比语义对齐**：确保语义特征确实编码了疾病信息（而不只是"不含域信息"）
+
+它们互补而非冗余。
+
+### Q4: 校准损失和熵正则有什么区别？
+
+| | 校准损失 | 熵正则 |
+|---|---|---|
+| **目的** | 让方差反映真实误差 | 防止方差坍缩为 0 |
+| **公式** | Huber(logvar, log(实际距离)) | mean(-logvar) |
+| **优化方向** | logvar ≈ log(实际距离) | logvar 不要太小 |
+| **权重** | 0.01 | 0.001 |
+
+两者配合使用：校准损失让方差"说实话"，熵正则兜底防止方差"不说话"。
+
+### Q5: 分布原型会不会让通信量翻倍？
 
 分布原型需要传 $\mu$ 和 $\log\sigma^2$ 两个向量，确实是点原型的 2 倍。但基数太小了：
 
@@ -577,7 +730,7 @@ KL 散度是**不对称**的：$\text{KL}(q\|p) \neq \text{KL}(p\|q)$。我们�
 
 相比模型权重的 2300 万参数，7 千个浮点数仍然可以忽略不计。
 
-### Q4: 联邦学习和普通分布式训练有什么区别？
+### Q6: 联邦学习和普通分布式训练有什么区别？
 
 | | 普通分布式训练 | 联邦学习 |
 |---|---|---|
@@ -586,43 +739,40 @@ KL 散度是**不对称**的：$\text{KL}(q\|p) \neq \text{KL}(p\|q)$。我们�
 | 隐私 | 不保护 | 核心设计目标 |
 | 客户端 | 同质服务器 | 异质设备/机构 |
 
-### Q5: 这个框架能用于其他任务吗？
+### Q7: 这个框架能用于其他任务吗？
 
 理论上可以。只要是分类任务 + Non-IID 数据分布 + 需要隐私保护的场景都可以用。关键是选择合适的主干网络和合理的原型维度。
 
-### Q6: 为什么分类损失中的"补全编码损失"不存在？
+### Q8: 如果某个全局原型只被 1 个客户端更新过怎么办？
 
-在多标签分类中，每个标签是独立的二分类，没有"互斥"关系。所以用的是 sigmoid + BCE（每个标签独立），而不是 softmax + CE（标签互斥）。
-
-### Q7: 如果某个全局原型只被 1 个客户端更新过怎么办？
-
-在 `bayesian_fusion()` 中（`aggregation.py` 第 50-51 行），如果某个标签只有 1 个客户端贡献了原型，不做贝叶斯融合，直接使用该客户端的原型。这避免了精度为零的退化情况。
-
-### Q8: "No Finding" 样本怎么处理？
-
-"No Finding"（14 个标签全为 0 的健康胸片）均匀分配给所有客户端（每个客户端至少 10 张）。它们作为负样本参与训练，确保每个客户端都见过"正常"的样子。
+在 `bayesian_fusion()` 中（`aggregation.py`），如果某个标签只有 1 个客户端贡献了原型，不做贝叶斯融合，直接使用该客户端的原型。这避免了精度为零的退化情况。
 
 ---
 
-## 附录：关键参数速查
+## 附录 A：关键参数速查
 
 ### 算法选择
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `--alg` | `d2fl` | 算法：`fedavg/fedprox/fedbn/scaffold/fedproto/d2fl` |
+| `--alg` | `d2fl` | 算法：`fedavg/fedprox/fedbn/scaffold/fedproto/fedgmkd/fedbcs/fedseproto/d2fl` |
 
 ### D²-FL 核心参数
 | 参数 | 默认 | 作用 |
 |------|------|------|
 | `--use_distributional` | False | 用高斯分布原型（否则点原型） |
 | `--dist_type` | `kl` | 分布距离：`kl/wasserstein/mse` |
-| `--use_disentangle` | False | 开启语义/风格解耦 |
-| `--sem_ratio` | 0.75 | 语义维度占比 |
+| `--use_disentangle` | False | 开启语义/风格解耦（含 HSIC + 门控熵 + 正交） |
+| `--sem_ratio` | 0.75 | 语义维度占比（初始门控偏向） |
 | `--dis_lambda` | 0.05 | 解耦损失权重 |
+| `--cal_lambda` | 0.01 | 校准损失权重 |
+| `--contra_lambda` | 0.05 | 对比语义对齐权重 |
+| `--adv_lambda` | 0.01 | 对抗域不变性权重 |
+| `--ent_lambda` | 0.001 | 熵正则权重 |
 | `--proto_momentum` | 0.9 | EMA 动量系数 |
 | `--ld` | 1.0 | 原型损失权重 λ |
 | `--ld_warmup` | 50 | λ 预热轮数 |
 | `--temperature` | 1.0 | 推理温度系数 |
+| `--use_per_class_temp` | True | 逐类可学习温度 |
 
 ### 差分隐私
 | 参数 | 默认 | 作用 |
@@ -636,138 +786,19 @@ KL 散度是**不对称**的：$\text{KL}(q\|p) \neq \text{KL}(p\|q)$。我们�
 | 参数 | 默认 | 作用 |
 |------|------|------|
 | `--num_users` | 20 | 客户端数 |
-| `--frac` | 0.04 | 每轮参与比例 |
+| `--frac` | 0.25 | 每轮参与比例 |
 | `--rounds` | 100 | 全局通信轮数 |
 | `--train_ep` | 1 | 每轮本地 epoch |
 | `--ways` | 3 | 每客户端平均类别数 |
 | `--shots` | 100 | 每类平均样本数 |
 | `--proto_dim` | 256 | 原型向量维度 |
 
----
-
-## 15. 模型架构
-
-### 预训练 ResNet-50 Backbone (所有算法共用)
-
-所有算法统一使用 `D2FLResNet`：ImageNet 预训练 ResNet-50 + 原型头 + 分类头。
-
-```
-Input (3, 224, 224)  ← 灰度X光片经 Grayscale(3) 转3通道
-  → stem: conv1 (7×7) → BN → ReLU → MaxPool  ← ImageNet 预训练权重
-  → layer1: 3× Bottleneck(64→256)    ← 冻结
-  → layer2: 4× Bottleneck(256→512)   ← 冻结
-  → layer3: 6× Bottleneck(512→1024)  ← 微调
-  → layer4: 3× Bottleneck(1024→2048) ← 微调
-  → AdaptiveAvgPool2d(1) → Flatten → (2048-dim)
-  → fc1 (2048 → proto_dim=256) → ReLU  ← 原型特征
-  → [ProbabilisticProtoHead]  ← (可选) 分布原型
-  → fc2 (256 → 14)  ← 多标签 logits
-```
-
-Bottleneck expansion=4，总参数量约 23M。冻结浅层 (layer1-2)、微调深层 (layer3-4) 的策略兼顾了预训练知识保留和医疗影像域适应。
-
----
-
-## 16. 系统架构
-
-```
-D²-FL/
-├── exps/
-│   └── federated_main.py          ← 主入口
-├── lib/
-│   ├── options.py                 ← 参数解析
-│   ├── utils.py                   ← 数据加载、权重聚合、原型聚合
-│   ├── update.py                  ← 本地训练、测试、多标签原型提取
-│   ├── sampling.py                ← IID/Non-IID 数据划分
-│   ├── chestxray.py               ← ChestX-ray14 数据集类
-│   ├── visualize.py               ← t-SNE 原型可视化
-│   ├── models/
-│   │   └── resnet.py              ← D2FLResNet / ResNet50 backbone
-│   ├── dist_proto/                ← 分布原型子模块
-│   │   ├── proto_head.py          ← ProbabilisticProtoHead (μ, logvar)
-│   │   ├── losses.py              ← KL, Wasserstein, MSE 损失
-│   │   ├── aggregation.py         ← 贝叶斯融合
-│   │   └── disentangle.py         ← 解耦原型头 + HSIC 损失
-│   └── dp/                        ← 差分隐私子模块
-│       └── mechanisms.py          ← DPMechProto, MomentsAccountant
-├── figures/                       ← 架构图
-├── paper/                         ← 论文与理论文档
-├── scripts/
-│   └── run.sh                     ← 启动脚本
-└── requirements.txt
-```
-
-### 主训练循环调用关系
-
-```
-federated_main.py
-  │
-  ├─ args_parser()             → 解析命令行参数
-  ├─ get_dataset()             → 加载 + 划分数据
-  │   ├─ ChestXray14()         → 读取 Data_Entry_2017.csv + PNG 图片
-  │   └─ sampling.chestxray_noniid() → 多标签 Non-IID 划分
-  │
-  ├─ 构建 local_model_list[]   → 每个客户端一个 ResNet50
-  │
-  └─ FedProto_taskheter() / D2FL_taskheter()  → 主训练循环
-      │
-      For each round:
-        ├─ 采样 m = frac * K 个客户端
-        For each selected client:
-          ├─ LocalUpdate.update_weights_het()
-          │   ├─ model → (logits, protos) 或 (logits, mu, logvar)
-          │   ├─ loss = BCE + λ * proto_loss
-          │   └─ agg_func() → 多标签原型取平均/合并方差
-          │
-          ├─ DPMechProto.clip_and_noise() → (可选) DP 扰动
-          │
-        ├─ proto_aggregation() → 跨客户端原型聚合
-        │   └─ bayesian_fusion_single_label() → (可选) 分布原型贝叶斯融合
-        │
-        └─ 将本轮训练权重写回 local_model_list
-
-      test_inference_new_het_lt_D2FL()
-        ├─ 不使用全局原型: sigmoid(logits) > 0.5  (per-label)
-        └─ 使用全局原型: 负原型距离 → sigmoid → 二值预测 (per-label)
-```
-
----
-
-## 17. 实现细节与注意事项
-
-### 17.1 原型格式统一
-
-全局原型字典 `global_protos` 的 value 格式：
-- **点原型**: 单一张量 `tensor(shape=[proto_dim])`
-- **分布原型**: 二元组 `(mu: tensor, logvar: tensor)`，各自 shape=[proto_dim]
-
-### 17.2 客户端采样
-
-`--frac` 参数控制每轮参与训练的客户端比例。每轮随机采样 `m = max(1, int(frac * K))` 个客户端。未参与轮的客户端保留上一轮模型，在后续轮次可被选中继续训练。
-
-### 17.3 多标签原型损失计算
-
-原型正则化损失 `L_proto` 的计算方式（以点原型为例）：
-
-```
-对 batch 中每张图 i:
-  对每个正标签 j (labels[i, j] == 1):
-    loss2 += MSE(proto_i, global_protos[j])
-loss2 = loss2 / count  # 除以所有正标签总数
-```
-
-即平均到每个正标签上，而非每张图。这意味着有多个疾病的 X 光片对原型损失的贡献更大。
-
-### 17.4 "No Finding" 负样本处理
-
-"No Finding"（标签全为 0）的样本在 Non-IID 划分时均匀分配给所有客户端（每个客户端至少 10 张），作为负样本参与训练，确保每个客户端都能学到"正常"的表示。
-
-### 17.5 分布原型的数值稳定性
-
-- `logvar` 被 clamp 到 [-10, 10] 范围（`ProbabilisticProtoHead`）
-- `var = exp(logvar)`，对应方差范围约 [4.5e-5, 2.2e4]
-- `agg_func` 中 `logvar_avg = log(avg_var + 1e-8)` 防止 log(0)
-- 推理时 `g_var + 1e-8` 防止除零
+### Baseline 专属参数
+| 参数 | 默认 | 适用算法 | 作用 |
+|------|------|---------|------|
+| `--fedprox_mu` | 0.01 | FedProx | 近端约束系数 |
+| `--gmm_components` | 3 | FedGMKD | GMM 成分数 |
+| `--mi_lambda` | 0.05 | FedSeProto | HSIC MI 最小化权重 |
 
 ---
 
@@ -779,17 +810,28 @@ loss2 = loss2 / count  # 除以所有正标签总数
 | N_k | 客户端 k 的样本数 |
 | C | 总类别数 (ChestX-ray14: 14) |
 | c_k | 客户端 k 拥有的类别集合 |
-| f_k | 客户端 k 的本地模型 (ResNet-50) |
+| f_k | 客户端 k 的本地模型 (D2FLResNet) |
 | p_k^(i) | 客户端 k 中样本 i 的原型向量 |
 | P_k^(j) | 客户端 k 中类别 j 的聚合原型 |
 | G^(j) | 类别 j 的全局原型 |
 | L_BCE | 二值交叉熵多标签分类损失 |
 | L_proto | 原型距离损失 |
+| L_dis | 解耦损失（HSIC + 门控熵 + 正交） |
+| L_cal | 校准损失（Huber） |
+| L_contra | 对比语义对齐损失（InfoNCE） |
+| L_adv | 对抗域不变性损失（GRL + BCE） |
+| L_ent | 熵正则损失（-logvar mean） |
 | λ | 原型损失权重 (`--ld`) |
+| λ_dis | 解耦损失权重 (`--dis_lambda`) |
+| λ_cal | 校准损失权重 (`--cal_lambda`) |
+| λ_contra | 对比损失权重 (`--contra_lambda`) |
+| λ_adv | 对抗损失权重 (`--adv_lambda`) |
+| λ_ent | 熵正则权重 (`--ent_lambda`) |
 | μ, σ² | 高斯分布原型的均值和方差 |
 | ε, δ | 差分隐私参数 |
 | z_sem | 语义原型向量 (共享) |
 | z_style | 风格原型向量 (本地) |
-| L_dis | 解耦独立性损失 (HSIC) |
-| λ_dis | 解耦损失权重 (`--dis_lambda`) |
-| y^(i) | 样本 i 的 14 维多标签二值向量 |
+| gate | 可学习门控值 (每维 [0,1]) |
+| T_j | 第 j 类的推理温度 |
+| β | EMA 动量系数 (`--proto_momentum`) |
+| W | λ 预热轮数 (`--ld_warmup`) |
