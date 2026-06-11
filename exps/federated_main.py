@@ -28,15 +28,9 @@
 
 import copy, sys
 import time
-import numpy as np
-from tqdm import tqdm
-import torch
-
-from lib.update import test_inference_new_het_lt_D2FL
-from tensorboardX import SummaryWriter
-import random
 from pathlib import Path
 
+# sys.path 必须在其他 lib import 之前设置
 lib_dir = (Path(__file__).parent / ".." / "lib").resolve()
 if str(lib_dir) not in sys.path:
     sys.path.insert(0, str(lib_dir))
@@ -44,6 +38,13 @@ mod_dir = (Path(__file__).parent / ".." / "lib" / "models").resolve()
 if str(mod_dir) not in sys.path:
     sys.path.insert(0, str(mod_dir))
 
+import numpy as np
+from tqdm import tqdm
+import torch
+from tensorboardX import SummaryWriter
+import random
+
+from lib.update import test_inference_new_het_lt_D2FL
 from options import args_parser
 from update import (LocalUpdate, test_inference_new_het_lt,
                     eval_clients_multilabel,
