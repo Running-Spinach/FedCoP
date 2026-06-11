@@ -808,13 +808,13 @@ if __name__ == '__main__':
     # ── Non-IID 数据划分参数 ──
     # n_list: 每个客户端拥有的类别数（在 [ways-stdev, ways+stdev] 随机采样）
     # k_list: 每个客户端每类拥有的样本数
-    n_list = np.random.randint(
-        max(2, args.ways - args.stdev),
-        min(args.num_classes, args.ways + args.stdev + 1),
-        args.num_users
-    )
-    k_list = np.random.randint(args.shots - args.stdev + 1,
-                                args.shots + args.stdev - 1, args.num_users)
+    ways_low = max(2, args.ways - args.stdev)
+    ways_high = max(ways_low + 1, min(args.num_classes, args.ways + args.stdev + 1))
+    n_list = np.random.randint(ways_low, ways_high, args.num_users)
+
+    shots_low = max(1, args.shots - args.stdev + 1)
+    shots_high = max(shots_low + 1, args.shots + args.stdev - 1)
+    k_list = np.random.randint(shots_low, shots_high, args.num_users)
 
     # ── 加载数据集（ChestX-ray14）──
     train_dataset, test_dataset, user_groups, user_groups_lt, \

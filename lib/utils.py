@@ -59,6 +59,11 @@ class TransformedSubset:
             img = self.transform(img)
         return img, label
 
+    @property
+    def labels(self):
+        """代理底层 dataset 的 labels，只返回当前子集的标签"""
+        return self.dataset.labels[self.indices]
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  数据集加载
