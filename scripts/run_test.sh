@@ -48,7 +48,7 @@ run_algo() {
 }
 
 ALL_ALGOS=(
-    "fedavg:${BASE_ARGS} --frac 1.0 --alg fedavg"
+    "fedavg:${BASE_ARGS} --alg fedavg"
     "fedproto:${BASE_ARGS} --alg fedproto"
     "fedgmkd:${BASE_ARGS} --alg fedgmkd --gmm_components 2"
     "fedbcs:${BASE_ARGS} --alg fedbcs"

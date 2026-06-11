@@ -2,16 +2,13 @@
 
 Privacy-Preserving Medical Image Classification via Federated Prototype Learning with Distributional Prototypes, Disentangled Representations, and Differential Privacy.
 
-All algorithms use **ImageNet pretrained ResNet-50** backbone + optional **Differential Privacy** for fair comparison. Based on [FedProto (AAAI 2022)](https://arxiv.org/abs/2105.00243), this project provides **7 FL baselines** + the proposed **D²-FL** method:
+All algorithms use **ImageNet pretrained ResNet-50** backbone + optional **Differential Privacy** for fair comparison. Based on [FedProto (AAAI 2022)](https://arxiv.org/abs/2105.00243), this project provides **5 FL baselines** + the proposed **D²-FL** method:
 
 ### Baselines (comparison algorithms)
 
 | Algorithm | Shared Info | Key Mechanism | Paper |
 |-----------|------------|---------------|-------|
 | **FedAvg** | Model weights | Simple weight averaging + DP | AISTATS 2017 |
-| **FedProx** | Model weights | Proximal term `mu/2 * ||w - w_t||^2` + DP | MLSys 2020 |
-| **FedBN** | Model weights (no BN) | Local BN stats, global conv/linear + DP | ICLR 2021 |
-| **SCAFFOLD** | Model weights + control variates | Gradient correction `g - c_i + c` + DP | ICML 2020 |
 | **FedProto** | Class prototypes (point) | Prototype regularization + nearest-neighbor + DP | AAAI 2022 |
 | **FedGMKD** | GMM prototypes | EM-fitted GMM per class + discrepancy-aware aggregation + DP | NeurIPS 2024 |
 | **FedBCS** | Frequency-calibrated prototypes | InstanceNorm-style feature recalibration + DP | AAAI 2026 |
@@ -74,7 +71,7 @@ The `--data_dir` flag controls the root data directory (default: `../data/`).
 ```
 D²-FL/
 ├── exps/
-│   └── federated_main.py          # Main entry point (8 algorithms)
+│   └── federated_main.py          # Main entry point (6 algorithms)
 ├── lib/
 │   ├── options.py                 # Argument parsing
 │   ├── utils.py                   # Data loading, prototype aggregation
@@ -95,7 +92,7 @@ D²-FL/
 ├── figures/                       # Architecture diagrams
 ├── paper/                         # Paper & theory documentation
 ├── scripts/
-│   └── run.sh                     # Launch script (8 algorithms)
+│   └── run.sh                     # Launch script (6 algorithms)
 ├── requirements.txt
 └── README.md
 ```
@@ -110,30 +107,8 @@ Select the algorithm via `--alg` (default: `d2fl`). All algorithms use pretraine
 python exps/federated_main.py --alg fedproto \
     --ways 5 --shots 100 --num_users 20 --rounds 200 --ld 1.0
 
-# FedProto + DP
-python exps/federated_main.py --alg fedproto \
-    --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
-    --ways 5 --num_users 20 --rounds 30
-
 # FedAvg
 python exps/federated_main.py --alg fedavg \
-    --ways 5 --shots 100 --num_users 20 --rounds 200 --frac 1.0
-
-# FedAvg + DP
-python exps/federated_main.py --alg fedavg \
-    --use_dp --dp_epsilon 8.0 --dp_clip 1.0 \
-    --ways 5 --num_users 20 --rounds 30
-
-# FedProx
-python exps/federated_main.py --alg fedprox \
-    --fedprox_mu 0.01 --ways 5 --num_users 20 --rounds 200
-
-# FedBN
-python exps/federated_main.py --alg fedbn \
-    --ways 5 --shots 100 --num_users 20 --rounds 200 --frac 1.0
-
-# SCAFFOLD
-python exps/federated_main.py --alg scaffold \
     --ways 5 --shots 100 --num_users 20 --rounds 200
 
 # FedGMKD (GMM prototypes + discrepancy-aware aggregation)
@@ -186,7 +161,7 @@ python exps/federated_main.py --alg d2fl \
 ### Algorithm Selection
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--alg` | d2fl | FL algorithm: fedavg / fedprox / fedbn / scaffold / fedproto / fedgmkd / fedbcs / fedseproto / d2fl |
+| `--alg` | d2fl | FL algorithm: fedavg / fedproto / fedgmkd / fedbcs / fedseproto / d2fl |
 
 ### Federated Learning
 | Parameter | Default | Description |
@@ -262,7 +237,6 @@ python exps/federated_main.py --alg d2fl \
 ### Algorithm-Specific
 | Parameter | Default | Applies To | Description |
 |-----------|---------|------------|-------------|
-| `--fedprox_mu` | 0.01 | FedProx | Proximal term coefficient |
 | `--gmm_components` | 3 | FedGMKD | GMM components per class |
 | `--mi_lambda` | 0.05 | FedSeProto | MI minimization loss weight |
 | `--pretrained` | True | All | Use ImageNet pretrained ResNet-50 |
@@ -271,16 +245,13 @@ python exps/federated_main.py --alg d2fl \
 
 ## Key Features
 
-### 8 Baselines + D²-FL Proposed Method
+### 5 Baselines + D²-FL Proposed Method
 
 All algorithms use **ImageNet pretrained ResNet-50** backbone + optional **DP** (weight-level for weight-sharing, prototype-level for prototype-sharing).
 
 | Algorithm | Type | Server Aggregation | Local Objective |
 |-----------|------|-------------------|-----------------|
 | **FedAvg** | Weight-sharing | Weight averaging (+ DP) | `L_BCE` |
-| **FedProx** | Weight-sharing | Weight averaging (+ DP) | `L_BCE + (mu/2) * ||w - w_global||^2` |
-| **FedBN** | Weight-sharing | Weight avg (skip BN) (+ DP) | `L_BCE` |
-| **SCAFFOLD** | Weight-sharing | Weight avg + control variate (+ DP) | `L_BCE` with grad correction |
 | **FedProto** | Prototype-sharing (baseline) | Prototype averaging (+ DP on protos) | `L_BCE + lambda * MSE(proto, global_proto)` |
 | **FedGMKD** | Prototype-sharing (baseline) | Discrepancy-aware GMM fusion (+ DP) | `L_BCE + lambda * GMM_proto_loss` |
 | **FedBCS** | Prototype-sharing (baseline) | Prototype averaging (+ DP) | `L_BCE + freq-domain style recalibration` |
@@ -357,32 +328,3 @@ For weight-sharing methods, evaluation uses per-client local model sigmoid thres
 }
 ```
 
-**FedProx:**
-```
-@inproceedings{li2020federated,
-  title={Federated Optimization in Heterogeneous Networks},
-  author={Li, Tian and Sahu, Anit Kumar and Zaheer, Manzil and Sanjabi, Maziar and Talwalkar, Ameet and Smith, Virginia},
-  booktitle={MLSys},
-  year={2020}
-}
-```
-
-**FedBN:**
-```
-@inproceedings{li2021fedbn,
-  title={FedBN: Federated Learning on Non-IID Features via Local Batch Normalization},
-  author={Li, Xiaoxiao and Jiang, Meirui and Zhang, Xiaofei and Kamp, Michael and Dou, Qi},
-  booktitle={ICLR},
-  year={2021}
-}
-```
-
-**SCAFFOLD:**
-```
-@inproceedings{karimireddy2020scaffold,
-  title={SCAFFOLD: Stochastic Controlled Averaging for Federated Learning},
-  author={Karimireddy, Sai Praneeth and Kale, Satyen and Mohri, Mehryar and Reddi, Sashank and Stich, Sebastian and Suresh, Ananda Theertha},
-  booktitle={ICML},
-  year={2020}
-}
-```
