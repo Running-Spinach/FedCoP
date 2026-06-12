@@ -957,84 +957,78 @@ def eval_clients_multilabel(args, local_model_list, test_dataset, user_groups_gt
 # =============================================================================
 
 def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list, user_groups_gt, global_protos=[]):
-    """FedProto 原版测试推理（单标签 NLLLoss 方式）
+    """FedProto 测试推理（多标签适配版）
 
-    注意：此函数使用 NLLLoss 和 torch.max 做预测，适用于单标签分类。
-    对于 ChestX-ray14 多标签场景，请使用 test_inference_new_het_lt_D2FL。
+    对 ChestX-ray14 多标签场景，使用 BCEWithLogitsLoss + sigmoid 阈值预测。
+    同时保留全局原型最近邻分类的能力（per-label 匹配）。
 
     返回:
-        acc_list_l: 各客户端不使用全局原型的准确率
-        acc_list_g: 各客户端使用全局原型最近邻分类的准确率
+        acc_list_l: 各客户端模型自身分类器的 per-label 准确率
+        acc_list_g: 各客户端使用全局原型最近邻的 per-label 准确率
         loss_list:  各客户端的原型损失
     """
-    loss, total, correct = 0.0, 0.0, 0.0
-    loss_mse = nn.MSELoss()
-
     device = args.device
+    loss_mse = nn.MSELoss()
 
     acc_list_g = []
     acc_list_l = []
     loss_list = []
     for idx in range(args.num_users):
         model = local_model_list[idx]
-        model.to(args.device)
-        testloader = DataLoader(DatasetSplit(test_dataset, user_groups_gt[idx]), batch_size=64, shuffle=True)
+        model.to(device)
+        testloader = DataLoader(DatasetSplit(test_dataset, user_groups_gt[idx]), batch_size=64, shuffle=False)
 
-        # 不使用全局原型的分类测试
+        # ── 不使用全局原型的分类测试 ──
         model.eval()
-        for batch_idx, (images, labels) in enumerate(testloader):
-            images, labels = images.to(device), labels.to(device)
-            model.zero_grad()
-            outputs, protos = model(images)
-
-            batch_loss = criterion(torch.log_softmax(outputs, dim=1), labels)
-            loss += batch_loss.item()
-
-            _, pred_labels = torch.max(outputs, 1)
-            pred_labels = pred_labels.view(-1)
-            correct += torch.sum(torch.eq(pred_labels, labels)).item()
-            total += len(labels)
-
-        acc = correct / total
-        print('| User: {} | Global Test Acc w/o protos: {:.3f}'.format(idx, acc))
-        acc_list_l.append(acc)
-
-        # 使用全局原型的最近邻分类测试
-        if global_protos != []:
-            for batch_idx, (images, labels) in enumerate(testloader):
+        correct_l, total_l = 0.0, 0.0
+        with torch.no_grad():
+            for images, labels in testloader:
                 images, labels = images.to(device), labels.to(device)
-                model.zero_grad()
-                outputs, protos = model(images)
+                output = model(images)
+                logits = output[0] if isinstance(output, tuple) else output
 
-                a_large_num = 100
-                dist = a_large_num * torch.ones(size=(images.shape[0], args.num_classes)).to(device)
-                for i in range(images.shape[0]):
-                    for j in range(args.num_classes):
-                        if j in global_protos.keys() and j in classes_list[idx]:
-                            d = loss_mse(protos[i, :], global_protos[j][0])
-                            dist[i, j] = d
+                preds = (torch.sigmoid(logits) > 0.5).float()
+                correct_l += (preds == labels).float().sum().item()
+                total_l += labels.numel()
 
-                _, pred_labels = torch.min(dist, 1)  # 选距离最近的类别
-                pred_labels = pred_labels.view(-1)
-                correct += torch.sum(torch.eq(pred_labels, labels)).item()
-                total += len(labels)
+        acc_l = correct_l / total_l if total_l > 0 else 0.0
+        print('| User: {} | Test Acc w/o protos: {:.4f}'.format(idx, acc_l))
+        acc_list_l.append(acc_l)
 
-                proto_new = copy.deepcopy(protos.data)
-                i = 0
-                for label in labels:
-                    if label.item() in global_protos.keys():
-                        proto_new[i, :] = global_protos[label.item()][0].data
-                    i += 1
-                loss2 = loss_mse(proto_new, protos)
-                if args.device == 'cuda':
-                    loss2 = loss2.cpu().detach().numpy()
-                else:
-                    loss2 = loss2.detach().numpy()
+        # ── 使用全局原型的最近邻分类测试 ──
+        if global_protos:
+            correct_g, total_g = 0.0, 0.0
+            proto_loss_sum = 0.0
+            proto_count = 0
+            with torch.no_grad():
+                for images, labels in testloader:
+                    images, labels = images.to(device), labels.to(device)
+                    output = model(images)
 
-            acc = correct / total
-            print('| User: {} | Global Test Acc with protos: {:.5f}'.format(idx, acc))
-            acc_list_g.append(acc)
-            loss_list.append(loss2)
+                    if isinstance(output, tuple):
+                        logits, protos = output[0], output[1] if len(output) >= 2 else output[0]
+                    else:
+                        logits, protos = output, output
+
+                    # 全局原型最近邻：对每个样本的每个正标签，找对应全局原型
+                    for i in range(images.shape[0]):
+                        sample_proto = protos[i]
+                        for c in range(args.num_classes):
+                            if labels[i, c] > 0 and c in global_protos:
+                                gproto = global_protos[c]
+                                gvec = gproto[0] if isinstance(gproto, tuple) else gproto
+                                proto_loss_sum += loss_mse(sample_proto, gvec).item()
+                                proto_count += 1
+
+                    preds = (torch.sigmoid(logits) > 0.5).float()
+                    correct_g += (preds == labels).float().sum().item()
+                    total_g += labels.numel()
+
+            acc_g = correct_g / total_g if total_g > 0 else 0.0
+            proto_loss_val = proto_loss_sum / max(proto_count, 1)
+            print('| User: {} | Test Acc with protos: {:.4f}'.format(idx, acc_g))
+            acc_list_g.append(acc_g)
+            loss_list.append(proto_loss_val)
 
     return acc_list_l, acc_list_g, loss_list
 

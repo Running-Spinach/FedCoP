@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# D²-FL 全算法对比运行脚本
+# D²-FL 全算法对比运行脚本 — 精简输出
 # =============================================================================
 # 用法:
 #   bash ./scripts/run.sh              # 运行所有 6 种算法（顺序执行）
@@ -13,14 +13,10 @@
 #   3. FedGMKD     — GMM 原型 + 差异感知聚合（NeurIPS 2024）
 #   4. FedBCS      — 频域风格重校准（AAAI 2026）
 #   5. FedSeProto  — 语义-域特征解耦（ECAI 2024）
-#   6. D²-FL       — ★ 提出方法（分布原型 + 解耦 + 贝叶斯融合 + EMA + 温度缩放）
+#   6. D²-FL       — ★ 提出方法
 # =============================================================================
 
-set -e  # 任一算法出错则停止
-
-# ── 时间估算 ──
-# 每轮约 60-120s（取决于算法复杂度），200 轮 × 6 算法 ≈ 20-40 GPU 小时
-# 建议在 screen/tmux 中运行：screen -S d2fl_bench && bash ./scripts/run.sh
+set -e
 
 DRY_RUN=false
 if [ "${1}" = "--dry-run" ]; then
@@ -39,53 +35,72 @@ FRAC=0.25
 
 BASE_ARGS="--num_classes 14 --num_users ${NUM_USERS} --ways ${WAYS} --shots ${SHOTS} --stdev ${STDEV} --rounds ${ROUNDS} --frac ${FRAC} --ld ${LD}"
 
-# ── 输出目录 ──
 LOG_DIR="./logs/benchmark_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "${LOG_DIR}"
 
-echo "=============================================="
-echo " D²-FL Benchmark: 6 算法对比"
-echo " 日志目录: ${LOG_DIR}"
-echo " 开始时间: $(date)"
-echo "=============================================="
-echo ""
-echo " 共享配置: rounds=${ROUNDS} users=${NUM_USERS} ways=${WAYS} shots=${SHOTS} frac=${FRAC}"
-echo ""
-echo " 预估总耗时: 20-40 GPU 小时（单张 RTX 3080/4070 级别）"
-echo "           : 建议在 screen/tmux 后台运行"
-echo ""
+# ═══════════════════════════════════════════════════════════════════
+#  表头
+# ═══════════════════════════════════════════════════════════════════
 
-# ── 辅助函数 ──
+print_header() {
+    printf "\n"
+    printf "==============================================\n"
+    printf " D²-FL Benchmark: 6 算法对比\n"
+    printf " rounds=%-3d  users=%-2d  ways=%-2d  shots=%-3d\n" ${ROUNDS} ${NUM_USERS} ${WAYS} ${SHOTS}
+    printf " 开始: %s\n" "$(date)"
+    printf "==============================================\n"
+    printf " %-12s | %-14s | %-12s | %s\n" "算法" "Acc (proto)" "Acc (model)" "耗时"
+    printf " %-12s-+-%-14s-+-%-12s-|-%s\n" "------------" "--------------" "------------" "--------"
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  运行单个算法
+# ═══════════════════════════════════════════════════════════════════
+
 run_algo() {
     local name="$1"
     local args="$2"
     local log_file="${LOG_DIR}/${name}.log"
 
-    echo "┌──────────────────────────────────────────────"
-    echo "│ [$(date +%H:%M:%S)] 开始: ${name}"
-    echo "├──────────────────────────────────────────────"
-    echo "│ 命令: python exps/federated_main.py ${args}"
-    echo "└──────────────────────────────────────────────"
+    printf " %-12s | ..." "${name}"
 
     if [ "${DRY_RUN}" = true ]; then
-        echo "  [DRY-RUN] 跳过执行"
-        echo ""
+        printf "\r %-12s | %-14s | %-12s | %s\n" "${name}" "[dry-run]" "-" "-"
+        printf "  命令: python exps/federated_main.py %s\n" "${args}"
         return
     fi
 
-    START_EPOCH=$(date +%s)
-    python exps/federated_main.py ${args} 2>&1 | tee "${log_file}"
-    END_EPOCH=$(date +%s)
-    ELAPSED=$(( (END_EPOCH - START_EPOCH) / 60 ))
+    SECONDS=0
+    _exit=0
+    python exps/federated_main.py ${args} > "${log_file}" 2>&1 || _exit=$?
+    ELAPSED=$(awk "BEGIN {printf \"%.1f\", ${SECONDS} / 60}")
 
-    echo ""
-    echo "  ✓ ${name} 完成，耗时: ${ELAPSED} 分钟"
-    echo "${name}: ${ELAPSED} min" >> "${LOG_DIR}/_summary.txt"
-    echo ""
+    # 提取结果
+    ACC_PROTO=$(grep -oP 'with protos.*mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null || echo "")
+    ACC_MODEL=$(grep -oP 'w/o protos.*mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null || echo "")
+    ACC_SINGLE=$(grep -oP 'For all users, mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null || echo "")
+
+    if [ -z "${ACC_PROTO}" ] && [ -z "${ACC_MODEL}" ] && [ -n "${ACC_SINGLE}" ]; then
+        ACC_PROTO="${ACC_SINGLE}"
+        ACC_MODEL="-"
+    fi
+
+    if [ -z "${ACC_PROTO}" ]; then
+        # 提取失败，显示 Python 退出码和最后 3 行 stderr
+        _tail=$(tail -3 "${log_file}" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g')
+        ACC_PROTO="ERR($_exit)"
+        ACC_MODEL="${_tail:-(empty log)}"
+    fi
+
+    printf "\r %-12s | %-14s | %-12s | %s min\n" \
+        "${name}" "${ACC_PROTO}" "${ACC_MODEL}" "${ELAPSED}"
+
+    printf "%-12s  proto_acc=%-8s  model_acc=%-8s  time=%s min\n" \
+        "${name}" "${ACC_PROTO}" "${ACC_MODEL}" "${ELAPSED}" >> "${LOG_DIR}/_summary.txt"
 }
 
 # ═══════════════════════════════════════════════════════════════════
-#  算法执行列表
+#  算法列表
 # ═══════════════════════════════════════════════════════════════════
 
 ALL_ALGOS=(
@@ -97,18 +112,21 @@ ALL_ALGOS=(
     "d2fl:${BASE_ARGS} --alg d2fl --use_distributional --dist_type kl --use_disentangle --dis_lambda 0.05 --cal_lambda 0.01 --contra_lambda 0.05 --adv_lambda 0.01 --ent_lambda 0.001 --proto_momentum 0.9 --temperature 1.0 --ld_warmup 50"
 )
 
-# ── 如果指定了单个算法，只运行那一个 ──
+# ═══════════════════════════════════════════════════════════════════
+#  执行
+# ═══════════════════════════════════════════════════════════════════
+
 TARGET="${1:-all}"
 
 if [ "${TARGET}" != "all" ]; then
-    echo ">>> 单算法模式: ${TARGET}"
+    echo ">>> 单算法: ${TARGET}"
+    print_header
     FOUND=false
     for entry in "${ALL_ALGOS[@]}"; do
         ALGO_NAME="${entry%%:*}"
-        ALGO_ARGS="${entry#*:}"
         if [ "${ALGO_NAME}" = "${TARGET}" ]; then
             FOUND=true
-            run_algo "${ALGO_NAME}" "${ALGO_ARGS}"
+            run_algo "${ALGO_NAME}" "${entry#*:}"
         fi
     done
     if [ "${FOUND}" = false ]; then
@@ -117,28 +135,18 @@ if [ "${TARGET}" != "all" ]; then
         exit 1
     fi
 else
-    echo ">>> 全算法对比模式（顺序执行）"
-    echo ""
+    print_header
     for entry in "${ALL_ALGOS[@]}"; do
         ALGO_NAME="${entry%%:*}"
-        ALGO_ARGS="${entry#*:}"
-        run_algo "${ALGO_NAME}" "${ALGO_ARGS}"
+        run_algo "${ALGO_NAME}" "${entry#*:}"
     done
 fi
 
-# ═══════════════════════════════════════════════════════════════════
-#  完成摘要
-# ═══════════════════════════════════════════════════════════════════
-
-echo ""
-echo "=============================================="
-echo " Benchmark 完成"
-echo " 结束时间: $(date)"
-echo " 日志目录: ${LOG_DIR}"
-echo "=============================================="
+printf " %-12s-+-%-14s-+-%-12s-|-%s\n" "------------" "--------------" "------------" "--------"
+printf "\n 完成: %s\n" "$(date)"
+printf " 详细日志: ${LOG_DIR}/\n\n"
 
 if [ -f "${LOG_DIR}/_summary.txt" ]; then
-    echo ""
     echo "各算法耗时汇总:"
     cat "${LOG_DIR}/_summary.txt"
 fi

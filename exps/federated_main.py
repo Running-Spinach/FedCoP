@@ -44,7 +44,7 @@ import torch
 from tensorboardX import SummaryWriter
 import random
 
-from lib.update import test_inference_new_het_lt_D2FL
+from update import test_inference_new_het_lt_D2FL
 from options import args_parser
 from update import (LocalUpdate, test_inference_new_het_lt,
                     eval_clients_multilabel,
@@ -820,6 +820,13 @@ if __name__ == '__main__':
     train_dataset, test_dataset, user_groups, user_groups_lt, \
         classes_list, classes_list_gt = get_dataset(args, n_list, k_list)
 
+    # ── 算法特定参数（必须在模型创建之前设置，因为 ResNet50.__init__
+    #    会读取 args.use_distributional 来决定是否创建 ProtoHead）──
+    if args.alg == 'fedgmkd':
+        args.use_distributional = True
+    elif args.alg in ('fedproto', 'fedbcs', 'fedseproto'):
+        args.use_distributional = False
+
     # ── 创建模型 ──
     # D²-FL 使用 D2FLResNet（预训练+增强头），其他算法使用 ResNet50
     local_model_list = []
@@ -842,7 +849,6 @@ if __name__ == '__main__':
     # ── 算法调度 ──
     if args.alg == 'fedproto':
         # 基线：FedProto 点原型，不做任何增强
-        args.use_distributional = False
         args.use_dp = False
         FedProto_taskheter(args, train_dataset, test_dataset, user_groups,
                            user_groups_lt, local_model_list, classes_list)
@@ -854,15 +860,12 @@ if __name__ == '__main__':
         FedAvg_taskheter(args, train_dataset, test_dataset, user_groups,
                          user_groups_lt, local_model_list, classes_list)
     elif args.alg == 'fedgmkd':
-        args.use_distributional = True
         FedGMKD_taskheter(args, train_dataset, test_dataset, user_groups,
                           user_groups_lt, local_model_list, classes_list)
     elif args.alg == 'fedbcs':
-        args.use_distributional = False
         FedBCS_taskheter(args, train_dataset, test_dataset, user_groups,
                          user_groups_lt, local_model_list, classes_list)
     elif args.alg == 'fedseproto':
-        args.use_distributional = False
         FedSeProto_taskheter(args, train_dataset, test_dataset, user_groups,
                              user_groups_lt, local_model_list, classes_list)
 
