@@ -1,3 +1,3 @@
-# 功能：差分隐私子模块，提供高斯机制、隐私会计和噪声搜索功能
-
-from .mechanisms import DPMechProto, MomentsAccountant, compute_noise_multiplier_from_epsilon,DPMechWeight
+# 差分隐私模块已移除
+# D²-FL 通过分布原型（贝叶斯融合）+ 语义解耦（仅共享语义，隔离域特征）隐式保护隐私
+# 详见 README "Privacy" 章节

@@ -839,7 +839,7 @@ class LocalUpdate(object):
                         loss.item(),
                         acc_val.item()))
 
-                # ── 记录各损失分量（用于 TensorBoard 可视化）──
+                # ── 记录各损失分量 ──
                 def _val(v):
                     """安全取值：torch.Tensor 取 .item()，标量直接返回"""
                     return v.item() if isinstance(v, torch.Tensor) else v

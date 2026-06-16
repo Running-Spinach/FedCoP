@@ -6,8 +6,6 @@ __pycache__/
 # Data files
 data/
 
-# TensorBoard logs
-tensorboard/
 
 # Virtual environments
 venv/

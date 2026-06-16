@@ -361,13 +361,5 @@ def exp_details(args):
 
     print(f'    Pretrained backbone : {getattr(args, "pretrained", True)}')
 
-    # 差分隐私配置
-    if getattr(args, 'use_dp', False):
-        print('    Differential Privacy: Enabled (all algorithms)')
-        print(f'    Target epsilon      : {args.dp_epsilon}')
-        print(f'    Target delta        : {args.dp_delta}')
-        print(f'    Clip norm           : {args.dp_clip}')
-    else:
-        print('    Differential Privacy: Disabled')
     print()
     return

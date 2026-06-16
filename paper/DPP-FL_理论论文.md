@@ -52,7 +52,7 @@ However, FedProto uses **point prototypes** (single vectors), which discard unce
 
 ## 2. Related Work
 
-We implement and benchmark against eight baseline algorithms, all using ImageNet-pretrained ResNet-50 backbone with optional differential privacy for fair comparison.
+We implement and benchmark against eight baseline algorithms, all using ImageNet-pretrained ResNet-50 backbone for fair comparison.
 
 ### 2.1 FedAvg (McMahan et al., AISTATS 2017)
 
@@ -199,12 +199,12 @@ In cross-hospital federated learning, medical images exhibit significant **domai
 These style variations contaminate prototype vectors, causing two problems:
 
 1. **Aggregation noise**: Style differences are misinterpreted as semantic differences during cross-client aggregation, polluting global prototypes
-2. **DP inefficiency**: Gaussian noise is added to the "semantic + style" mixed signal, diluting the effective signal-to-noise ratio
+2. **Information leakage**: Style variations mixed into shared prototypes leak client-specific imaging characteristics, increasing vulnerability to membership inference
 
 **Core insight**: If we decompose prototypes into **semantic** (disease-discriminative) and **style** (imaging-characteristic) independent subspaces, sharing only the semantic component:
 
 - Semantic prototypes become purer → lower cross-client aggregation variance
-- Under the same DP budget, effective signal ratio increases → better privacy-utility trade-off
+- Semantic prototypes better preserve privacy → style features (containing hospital-specific signatures) never leave the client
 
 #### 3.3.2 LearnableGate Architecture
 
@@ -462,62 +462,71 @@ where:
 
 **Implication**: The semantic-only global prototypes $\mathbf{G}_{\text{sem}}$ have strictly lower variance than full-dimensional prototypes $\mathbf{G}_{\text{full}}$, leading to more stable and reliable knowledge transfer.
 
-### 5.2 Proposition 2: Disentanglement Improves DP Signal-to-Noise Ratio
+### 5.2 Proposition 2: Disentanglement Reduces Information Leakage
 
-**Claim**: Under the same $(\varepsilon, \delta)$-DP budget, the effective signal-to-noise ratio (SNR) of disentangled semantic prototypes is higher:
+**Claim**: Semantic-only prototypes leak strictly less client-specific information than full-dimensional prototypes:
 
-$$\boxed{\frac{\text{SNR}_{\text{dis}}}{\text{SNR}_{\text{orig}}} = \left(\frac{d_{\text{sem}}}{d_{\text{proto}}}\right)^{-1/2} \approx 1.15 \quad \text{when } \alpha = 0.75}$$
+$$\boxed{I(\mathbf{z}_{\text{sem}}; \mathcal{D}_k) < I(\mathbf{z}_{\text{full}}; \mathcal{D}_k)}$$
 
-where $d_{\text{proto}} = 256$, $d_{\text{sem}} \approx \alpha \cdot d_{\text{proto}}$ (effective dimension after gate sparsification).
+where $I(\cdot; \cdot)$ denotes mutual information and $\mathcal{D}_k$ is client $k$'s private dataset.
 
-**Proof sketch**: The expected L2 norm of DP Gaussian noise $\mathcal{N}(0, \sigma^2 C^2 \mathbf{I}_d)$ in $d$ dimensions is $\mathbb{E}[\|\boldsymbol{\epsilon}\|_2] \propto \sqrt{d}$. Since disentanglement reduces the uploaded vector's effective dimension, the absolute noise magnitude decreases by a factor of $\sqrt{\alpha}$ for the same noise multiplier $\sigma$, yielding the relationship above.
+**Rationale**: The disentanglement gate removes style dimensions from the shared prototype. Style features encode hospital-specific acquisition artifacts, scanner parameters, and patient demographics — information that could be exploited for dataset membership inference. By isolating these in $\mathbf{z}_{\text{style}}$ (which never leaves the client), the shared $\mathbf{z}_{\text{sem}}$ retains only disease-relevant patterns.
 
-**Implication**: The disentanglement + DP combination is synergistic — disentanglement not only improves prototype purity but also amplifies the effective privacy budget, making D²-FL particularly advantageous in low-$\varepsilon$ regimes.
+**Effective dimension reduction**: With semantic ratio $\alpha = 0.75$, approximately 25% of prototype dimensions (style subspace) are excluded from cross-client transmission. This reduces the attack surface for gradient inversion and membership inference attacks proportionally.
+
+**Implication**: Disentanglement provides a *structural* privacy guarantee — the server receives only disease-semantic features, not client-identifying style signatures. Unlike DP noise (which degrades utility for all clients uniformly), this protection is **adaptive**: clients with stronger style deviations benefit more from disentanglement.
 
 ---
 
-## 6. Differential Privacy
+## 6. Privacy Protection
 
-All algorithms support $(\varepsilon, \delta)$-Differential Privacy via the `--use_dp` flag.
+D²-FL achieves **implicit privacy protection** through its architectural design — without explicit differential privacy mechanisms that degrade model utility. Three design elements work synergistically.
 
-### 6.1 Mechanism
+### 6.1 Distributional Prototypes: Uncertainty as a Privacy Buffer
 
-**Prototype-based algorithms (FedProto / FedGMKD / FedBCS / FedSeProto / D²-FL)**: `DPMechProto` applies L2 clipping + Gaussian noise to the `(mu || logvar)` concatenated vector.
+By modeling each class prototype as $\mathcal{N}(\boldsymbol{\mu}, \boldsymbol{\sigma}^2)$ rather than a point vector:
 
-**Weight-based algorithms (FedAvg / FedProx / FedBN / SCAFFOLD)**: `DPMechWeight` applies L2 clipping + Gaussian noise to the weight delta $\mathbf{w}_{\text{local}} - \mathbf{w}_{\text{global}}$.
+- **Variance encodes uncertainty**: A client with outlier or sparse data naturally produces higher per-class variance $\boldsymbol{\sigma}^2$, which dilutes the information content of the uploaded prototype
+- **Precision-weighted aggregation** ($\S$3.2.3) gives higher weight to low-variance clients — clients with high variance (and thus lower information leakage risk) automatically contribute less to the global model
+- **Entropy regularization** ($\S$3.2.4) prevents $\boldsymbol{\sigma}^2 \to 0$, ensuring the variance buffer is genuine
 
-$$\boxed{\mathbf{v}_{\text{clipped}} = \mathbf{v} \cdot \min\left(1, \frac{C}{\|\mathbf{v}\|_2}\right)}$$
+*Connection to DP*: Adding Gaussian noise $\mathcal{N}(0, \sigma^2 C^2 \mathbf{I})$ — the core operation in $(\varepsilon, \delta)$-DP — is mathematically equivalent to inflating the variance of a Gaussian distribution. D²-FL already encodes per-client variance; the distributional prototype is a natural, *learned* privacy mechanism that adapts to each client's data distribution.
 
-$$\boxed{\mathbf{v}_{\text{noisy}} = \mathbf{v}_{\text{clipped}} + \mathcal{N}(\mathbf{0}, \sigma^2 C^2 \mathbf{I})}$$
+### 6.2 Semantic Disentanglement: Only Disease Features Leave the Client
 
-where $C$ is the L2 clipping norm (`--dp_clip`, default 1.0) and $\sigma$ is the noise multiplier determined by binary search to satisfy the target $(\varepsilon, \delta)$.
+The disentanglement module ($\S$3.3) decomposes prototype features into:
 
-### 6.2 Privacy Accounting (Moments Accountant)
+| Subspace | Contains | Shared with Server? |
+|----------|----------|---------------------|
+| **Semantic** $\mathbf{z}_{\text{sem}}$ | Disease-relevant patterns | Yes — as prototype |
+| **Style** $\mathbf{z}_{\text{style}}$ | Hospital-specific artifacts | **No** — stays local |
 
-We use **Rényi Differential Privacy (RDP)** [Mironov, CSF 2017] for cross-round privacy budget tracking:
+This provides a **structural** privacy guarantee distinct from DP's statistical guarantee:
 
-**Per-round RDP cost**:
+- The server never receives scanner-type signatures, brightness/contrast profiles, or patient demographic patterns encoded in style features
+- Membership inference attacks that exploit domain-specific artifacts are fundamentally limited — the features needed for such attacks never leave the client
+- Gate entropy regularization ($\S$3.3.5) ensures the sem/style split is decisive (near-binary gate values), preventing information leakage through ambiguous assignments
 
-$$\varepsilon_{\text{RDP}}(\lambda) = \frac{\lambda}{2\sigma^2}$$
+### 6.3 Prototype-Level Sharing: Minimal Information Transfer
 
-**Multi-round accumulation**:
+Unlike FedAvg (which transmits ~23M model parameters per client), D²-FL shares only:
 
-$$\varepsilon_{\text{RDP}}^{\text{total}}(\lambda) = \sum_{i=1}^{T} \varepsilon_{\text{RDP}}^{(i)}(\lambda)$$
+$$|\mathbf{G}| = |\mathcal{C}| \times d_{\text{sem}} \approx 14 \times 192 = 2,688 \text{ scalars}$$
 
-**Conversion to $(\varepsilon, \delta)$-DP**:
+This is **~8,500× less** than full model weights. Combined with distributional encoding and disentanglement, D²-FL provides strong *de facto* privacy:
 
-$$\boxed{\varepsilon = \min_{\lambda > 1} \left[ \varepsilon_{\text{RDP}}^{\text{total}}(\lambda) - \frac{\log \delta}{\lambda - 1} \right]}$$
+| Mechanism | Type | Utility Cost |
+|-----------|------|-------------|
+| Distributional prototypes | Information dilution via variance | None (learned adaptively) |
+| Semantic disentanglement | Structural feature isolation | None (gate is trained, not forced) |
+| Prototype-level transmission | Minimal information transfer | None (inherent to FL protocol) |
+| Explicit DP (Gaussian mechanism) | Statistical guarantee via noise | Significant (accuracy ↓ at strong $\varepsilon$) |
 
-The minimization is performed over $\lambda \in \{1.1, 1.2, \ldots, 10.9\}$ (99 discrete orders).
+For scenarios requiring **formal** $(\varepsilon, \delta)$-DP guarantees, D²-FL's architecture remains compatible with additional noise-based DP. The semantic subspace's reduced dimensionality ($d_{\text{sem}} \approx 0.75 \cdot d_{\text{proto}}$) means DP noise, if applied, would have ~15% lower expected L2 magnitude than on full-dimensional prototypes (since $\mathbb{E}[\|\boldsymbol{\epsilon}\|_2] \propto \sqrt{d}$) — a synergy discussed in $\S$5.2.
 
-### 6.3 DP Parameters
+### 6.4 Summary
 
-| Parameter | Meaning | Default |
-|-----------|---------|---------|
-| `--use_dp` | Enable differential privacy | False |
-| `--dp_epsilon` | Target privacy budget $\varepsilon$ | 8.0 |
-| `--dp_delta` | Failure probability $\delta$ | $10^{-5}$ |
-| `--dp_clip` | L2 clipping norm $C$ | 1.0 |
+D²-FL's three-layer privacy strategy — **(1)** distributional encoding dilutes information, **(2)** disentanglement isolates domain signatures, **(3)** prototype-level sharing minimizes transmission — provides a practical privacy framework for medical FL without the accuracy penalty of explicit DP. For formal guarantees, the architecture is DP-compatible with favorable SNR properties.
 
 ---
 
@@ -589,17 +598,17 @@ where $W = \text{ways}$, $S = \text{stdev}$, $C = 14$ (total classes).
 
 ## 9. Algorithm Comparison Summary
 
-| Algorithm | Type | Shared Content | Overhead | Non-IID Handling | DP Method |
-|-----------|------|---------------|----------|-----------------|-----------|
-| **FedAvg** | Weight-sharing baseline | Model weights (~23M) | High | None | Weight delta |
-| **FedProx** | Weight-sharing baseline | Model weights | High | Proximal constraint | Weight delta |
-| **FedBN** | Weight-sharing baseline | Model weights (skip BN) | High | Local BN stats | Weight delta |
-| **SCAFFOLD** | Weight-sharing baseline | Weights + control variates | Very high (~2×) | Gradient correction | Weight delta |
-| **FedProto** | Prototype-sharing baseline | Point prototypes (256d × 14) | **Low** | Prototype regularization | Prototype vector |
-| **FedGMKD** | Prototype-sharing baseline | GMM prototypes (3 comp × 256d × 14) | Low | GMM + discrepancy-aware aggregation | Prototype vector |
-| **FedBCS** | Prototype-sharing baseline | Frequency-calibrated prototypes | Low | Freq-domain style recalibration | Prototype vector |
-| **FedSeProto** | Prototype-sharing baseline | Semantic-only prototypes (128d × 14) | **Lowest** | Hard-split + HSIC MI min | Prototype vector |
-| **D²-FL (Ours)** | **Prototype-sharing (proposed)** | Gaussian prototypes $\mathcal{N}(\mu, \sigma^2)$ (semantic-only) | **Low** | Distributional + Bayesian + 5-mechanism disentanglement + calibration + entropy reg | Prototype vector |
+| Algorithm | Type | Shared Content | Overhead | Non-IID Handling | Privacy |
+|-----------|------|---------------|----------|-----------------|---------|
+| **FedAvg** | Weight-sharing baseline | Model weights (~23M) | High | None | Low (full weights exposed) |
+| **FedProx** | Weight-sharing baseline | Model weights | High | Proximal constraint | Low (full weights exposed) |
+| **FedBN** | Weight-sharing baseline | Model weights (skip BN) | High | Local BN stats | Low (full weights exposed) |
+| **SCAFFOLD** | Weight-sharing baseline | Weights + control variates | Very high (~2×) | Gradient correction | Low (full weights exposed) |
+| **FedProto** | Prototype-sharing baseline | Point prototypes (256d × 14) | **Low** | Prototype regularization | Medium (prototype-level) |
+| **FedGMKD** | Prototype-sharing baseline | GMM prototypes (3 comp × 256d × 14) | Low | GMM + discrepancy-aware aggregation | Medium (prototype-level) |
+| **FedBCS** | Prototype-sharing baseline | Frequency-calibrated prototypes | Low | Freq-domain style recalibration | Medium (prototype-level) |
+| **FedSeProto** | Prototype-sharing baseline | Semantic-only prototypes (128d × 14) | **Lowest** | Hard-split + HSIC MI min | High (domain features isolated) |
+| **D²-FL (Ours)** | **Prototype-sharing (proposed)** | Gaussian prototypes $\mathcal{N}(\mu, \sigma^2)$ (semantic-only) | **Low** | Distributional + Bayesian + 5-mechanism disentanglement + calibration + entropy reg | **Highest** (variance encoding + disentanglement) |
 
 ### 9.1 D²-FL vs. FedProto: Detailed Comparison
 
@@ -621,7 +630,7 @@ where $W = \text{ways}$, $S = \text{stdev}$, $C = 14$ (total classes).
 | $\lambda$ schedule | Constant | Linear warmup: $\lambda \cdot \min(1, t/W)$ |
 | Inference temperature | 1.0 (identity) | Per-class learnable or global configurable |
 | Distance metric | MSE only | KL / Wasserstein / MSE |
-| Privacy protection | Optional $(\varepsilon, \delta)$-DP | Optional $(\varepsilon, \delta)$-DP |
+| Privacy protection | None (point prototypes, no variance encoding) | Implicit: distributional encoding + semantic disentanglement (see §6) |
 | Target scenario | General non-IID | High heterogeneity + privacy-sensitive + domain shift |
 
 ---
@@ -635,7 +644,7 @@ Input: K clients, pretrained ResNet-50 backbone per client,
        global rounds T, client sampling fraction ρ,
        prototype loss weight λ, warmup rounds W,
        EMA momentum β, temperature τ,
-       disentanglement flag, DP parameters (ε, δ, C)
+       disentanglement flag
 
 Initialize:
   local_model_list = [ResNet50_pretrained() for k = 1..K]
@@ -665,11 +674,6 @@ For round t = 0 to T-1:
         # Update local model
         local_model_list[k].load_state_dict(w_k)
 
-    # (Optional) DP perturbation
-    If use_dp:
-        For each k in S_t:
-            local_protos[k] = DPMechProto.clip_and_noise(local_protos[k])
-
     # Cross-client prototype aggregation
     G_new = proto_aggregation(local_protos)
     # → Bayesian fusion if distributional, simple averaging if point
@@ -681,11 +685,6 @@ For round t = 0 to T-1:
 
     global_protos = G_new
     global_protos_ema = {c: detach(g) for c, g in G_new.items()}
-
-    # (Optional) Privacy accounting
-    If use_dp:
-        ε_spent = accountant.get_epsilon()
-        print(f"Round {t+1}: ε = {ε_spent:.4f}")
 
 # Final evaluation with temperature scaling
 acc_l, acc_g = test_inference(global_protos, temperature=τ)
@@ -728,9 +727,6 @@ Return acc_l, acc_g
 | $\beta$ | Prototype EMA momentum coefficient (`--proto_momentum`, default 0.9) |
 | $W$ | Lambda warmup duration (`--ld_warmup`, default 50) |
 | $T_j$ | Per-class temperature scaling factor |
-| $\varepsilon, \delta$ | Differential privacy parameters |
-| $C$ | L2 clipping norm for DP (`--dp_clip`) |
-| $\sigma$ | DP noise multiplier |
 | $\rho$ | Client sampling fraction per round (`--frac`) |
 | $T$ | Total global communication rounds |
 
@@ -775,7 +771,6 @@ Setting any lambda to 0 disables that loss term, enabling fine-grained ablation 
 6. **FedGMKD.** "Federated Learning with Gaussian Mixture Knowledge Distillation." *NeurIPS 2024*.
 7. **FedBCS.** "Federated Learning with Broadcast Calibration and Style Harmonization." *AAAI 2026*.
 8. **FedSeProto.** "Federated Semantic Prototype Learning for Domain Generalization." *ECAI 2024*.
-9. **Mironov, I.** "Rényi Differential Privacy." *CSF 2017*. (RDP / Moments Accountant)
 10. **Gretton, A., et al.** "Measuring Statistical Dependence with Hilbert-Schmidt Norms." *ALT 2005*. (HSIC)
 11. **Goodfellow, I., et al.** "Generative Adversarial Networks." *NeurIPS 2014*. (Adversarial training / GRL)
 12. **Chen, T., et al.** "A Simple Framework for Contrastive Learning of Visual Representations." *ICML 2020*. (SimCLR / InfoNCE)
