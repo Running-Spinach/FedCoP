@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# D²-FL 快速测试脚本 — 精简输出，方便对比各算法结果
+# D²-FL 快速测试脚本 — 精简但报错清晰
 # =============================================================================
 # 用法:
 #   bash ./scripts/run_test.sh           # 运行全部 6 种算法
@@ -9,9 +9,14 @@
 
 set -e
 
+# ── 颜色 ──
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
 # ── 快速 Bug 检查参数（4090 上 ~30-50 min 跑完 6 算法）──
-# 核心思路：砍 rounds（多轮逻辑 5 轮足够验证），降 shots（省数据加载），
-# 缩 proto_dim（减计算量），其他保持能触发非 IID + 多客户端路径即可。
 ROUNDS=5
 NUM_USERS=5
 WAYS=3
@@ -26,18 +31,25 @@ BASE_ARGS="--num_classes 14 --num_users ${NUM_USERS} --ways ${WAYS} --shots ${SH
 LOG_DIR="./logs/test_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "${LOG_DIR}"
 
+# 全局追踪
+PASS_COUNT=0
+FAIL_COUNT=0
+declare -a FAIL_NAMES
+declare -a FAIL_MSGS
+
 # ═══════════════════════════════════════════════════════════════════
 #  表头
 # ═══════════════════════════════════════════════════════════════════
 
 print_header() {
-    printf "\n"
-    printf "==============================================\n"
-    printf " D²-FL 快速测试\n"
-    printf " rounds=%-2d  users=%-2d  ways=%-2d  shots=%-2d\n" ${ROUNDS} ${NUM_USERS} ${WAYS} ${SHOTS}
-    printf "==============================================\n"
-    printf " %-12s | %-14s | %-12s | %s\n" "算法" "Acc (proto)" "Acc (model)" "耗时"
-    printf " %-12s-+-%-14s-+-%-12s-|-%s\n" "------------" "--------------" "------------" "--------"
+    echo ""
+    echo "=============================================="
+    echo " D²-FL 快速测试"
+    echo " rounds=${ROUNDS}  users=${NUM_USERS}  ways=${WAYS}  shots=${SHOTS}  proto_dim=${PROTO_DIM}"
+    echo " 日志: ${LOG_DIR}"
+    echo "=============================================="
+    printf " %-12s | %-10s | %-8s | %-14s | %s\n" "算法" "状态" "Acc" "耗时" "备注"
+    printf " %-12s-+-%-10s-+-%-8s-+-%-14s-|-%s\n" "------------" "----------" "--------" "--------------" "----------"
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -49,42 +61,79 @@ run_algo() {
     local args="$2"
     local log_file="${LOG_DIR}/${name}.log"
 
-    printf " %-12s | ..." "${name}"
+    # 启动提示
+    printf " %-12s | ${CYAN}%-10s${NC} | %-8s | ...          |" "${name}" "running..." "..."
 
-    # 静默运行，全部输出写入日志文件
+    # 运行
     SECONDS=0
     _exit=0
     python exps/federated_main.py ${args} > "${log_file}" 2>&1 || _exit=$?
-    ELAPSED=$(awk "BEGIN {printf \"%.1f\", ${SECONDS} / 60}")
+    local elapsed_min=$(awk "BEGIN {printf \"%.1f\", ${SECONDS} / 60}")
 
-    # 从日志提取结果
-    # 格式1 (FedProto/D2FL): "For all users (with protos), mean of per-label acc is X, std is Y"
-    # 格式2 (FedAvg/FedGMKD/FedBCS/FedSeProto): "For all users, mean of per-label acc is X, std is Y"
-    # 格式3 (FedProto/D2FL): "For all users (w/o protos), mean of per-label acc is X, std is Y"
+    # ── 提取准确率 ──
+    local acc_proto=$(grep -oP 'with protos.*mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null || echo "")
+    local acc_model=$(grep -oP 'w/o protos.*mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null || echo "")
+    local acc_single=$(grep -oP 'For all users, mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null || echo "")
 
-    ACC_PROTO=$(grep -oP 'with protos.*mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null || echo "")
-    ACC_MODEL=$(grep -oP 'w/o protos.*mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null || echo "")
-    ACC_SINGLE=$(grep -oP 'For all users, mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null || echo "")
+    # ── 判断成功/失败 ──
+    if [ "${_exit}" -ne 0 ]; then
+        # Python 非零退出
+        local err_tail=$(tail -5 "${log_file}" 2>/dev/null)
+        # 提取最后一行 Traceback 中实际有用的错误
+        local err_line=$(grep -E '^[A-Za-z]+Error:|^ModuleNotFoundError:|^NameError:|^ValueError:|^TypeError:|^AttributeError:|^FileNotFoundError:' "${log_file}" 2>/dev/null | tail -1 || echo "exit code ${_exit}")
 
-    # FedAvg/FedGMKD/FedBCS/FedSeProto 只有单一 acc
-    if [ -z "${ACC_PROTO}" ] && [ -z "${ACC_MODEL}" ] && [ -n "${ACC_SINGLE}" ]; then
-        ACC_PROTO="${ACC_SINGLE}"
-        ACC_MODEL="-"
+        printf "\r %-12s | ${RED}%-10s${NC} | %-8s | %-14s | ${RED}%s${NC}\n" \
+            "${name}" "FAIL" "-" "${elapsed_min} min" "${err_line:-(see log)}"
+
+        FAIL_NAMES+=("${name}")
+        FAIL_MSGS+=("${err_line:-(see log)}")
+        ((FAIL_COUNT++))
+
+        # 打印错误详情
+        echo ""
+        echo -e "  ${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  ${RED}[ERROR] ${name} 失败 (exit ${_exit}, ${elapsed_min} min)${NC}"
+        echo -e "  ${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${err_tail}" | while IFS= read -r line; do
+            echo -e "  ${RED}|${NC} ${line}"
+        done
+        echo -e "  ${YELLOW}完整日志: ${log_file}${NC}"
+        echo ""
+        return
     fi
 
-    # 如果都没提取到，标记失败并显示原因
-    if [ -z "${ACC_PROTO}" ]; then
-        _tail=$(tail -3 "${log_file}" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g')
-        ACC_PROTO="ERR($_exit)"
-        ACC_MODEL="${_tail:-(empty log)}"
+    if [ -z "${acc_proto}" ] && [ -z "${acc_model}" ] && [ -z "${acc_single}" ]; then
+        # Python 正常退出但没提取到准确率
+        local err_tail=$(tail -5 "${log_file}" 2>/dev/null)
+
+        printf "\r %-12s | ${YELLOW}%-10s${NC} | %-8s | %-14s | no acc output\n" \
+            "${name}" "WARN" "-" "${elapsed_min} min"
+
+        FAIL_NAMES+=("${name}")
+        FAIL_MSGS+=("no accuracy output — possible silent failure")
+        ((FAIL_COUNT++))
+
+        echo ""
+        echo -e "  ${YELLOW}[WARN] ${name} 运行完成但未输出准确率 (${elapsed_min} min)${NC}"
+        echo -e "  ${YELLOW}完整日志: ${log_file}${NC}"
+        echo ""
+        return
     fi
 
-    printf "\r %-12s | %-14s | %-12s | %s min\n" \
-        "${name}" "${ACC_PROTO}" "${ACC_MODEL}" "${ELAPSED}"
+    # ── 成功 ──
+    local disp_acc="${acc_proto}"
+    local disp_note=""
+    if [ -z "${disp_acc}" ]; then
+        disp_acc="${acc_single}"
+    fi
+    if [ -n "${acc_model}" ] && [ "${acc_model}" != "" ]; then
+        disp_note="w/o proto: ${acc_model}"
+    fi
 
-    # 同时写入汇总文件
-    printf "%-12s  proto_acc=%-8s  model_acc=%-8s  time=%s min\n" \
-        "${name}" "${ACC_PROTO}" "${ACC_MODEL}" "${ELAPSED}" >> "${LOG_DIR}/_summary.txt"
+    printf "\r %-12s | ${GREEN}%-10s${NC} | %-8s | %-14s | %s\n" \
+        "${name}" "OK" "${disp_acc}" "${elapsed_min} min" "${disp_note}"
+
+    ((PASS_COUNT++))
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -122,5 +171,22 @@ else
     done
 fi
 
-printf " %-12s-+-%-14s-+-%-12s-|-%s\n" "------------" "--------------" "------------" "--------"
-printf "\n 详细日志: ${LOG_DIR}/\n\n"
+# ═══════════════════════════════════════════════════════════════════
+#  汇总
+# ═══════════════════════════════════════════════════════════════════
+
+printf " %-12s-+-%-10s-+-%-8s-+-%-14s-|-%s\n" "------------" "----------" "--------" "--------------" "----------"
+echo ""
+echo "=============================================="
+echo " 结果: ${GREEN}${PASS_COUNT} 通过${NC}  ${RED}${FAIL_COUNT} 失败${NC}  (共 $((PASS_COUNT + FAIL_COUNT)) 个算法)"
+echo " 日志: ${LOG_DIR}"
+echo "=============================================="
+
+if [ ${FAIL_COUNT} -gt 0 ]; then
+    echo ""
+    echo -e " ${RED}失败汇总:${NC}"
+    for i in $(seq 0 $((FAIL_COUNT - 1))); do
+        echo -e "   ${RED}✗${NC} ${FAIL_NAMES[$i]} — ${FAIL_MSGS[$i]}"
+    done
+    echo ""
+fi
