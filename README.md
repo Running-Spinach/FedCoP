@@ -1,365 +1,210 @@
-# D²-FL: Distributional Dual-Stream Federated Pathology Representation Learning
+# FedCoP: Federated Co-occurrence-aware Prototypes for Multi-Label Medical Image Classification
 
-Privacy-Preserving Medical Image Classification via Federated Prototype Learning with Distributional Prototypes and Disentangled Representations. D²-FL achieves implicit privacy protection through **distributional prototypes** (encoding uncertainty per client) and **semantic disentanglement** (sharing only disease-relevant features, isolating domain-specific style).
+Prototype-based federated learning on NIH ChestX-ray14, where **pathology co-occurrence (comorbidity) is recovered federatedly** and used to constrain prototype geometry (training) and propagate evidence across co-occurring classes (inference). FedCoP breaks the per-class-independence assumption shared by all prior prototype-FL methods.
 
-All algorithms use **ImageNet pretrained ResNet-50** backbone for fair comparison. Based on [FedProto (AAAI 2022)](https://arxiv.org/abs/2105.00243), this project provides **5 FL baselines** + the proposed **D²-FL** method:
+All algorithms use an **ImageNet-pretrained ResNet-50** backbone for fair comparison. Built on [FedProto (AAAI 2022)](https://arxiv.org/abs/2105.00243), this project provides **6 FL baselines** + the proposed **FedCoP** method + 3 ablations.
 
-### Baselines (comparison algorithms)
+## Why FedCoP
+
+Existing prototype-FL methods (FedProto, FedGMKD, FedBCS, FedSeProto, …) model each of the 14 pathologies with an **independent** prototype and decode labels with **independent per-class sigmoids** — assuming the labels are conditionally independent given features. This fails in ChestX-ray14, where diseases strongly co-occur. Worse, under non-IID class partitioning (each hospital sees only ~3/14 classes), **no single client can observe the global co-occurrence structure** — it is recoverable only by federated aggregation of label statistics. FedCoP:
+
+1. Estimates a global co-occurrence correlation matrix `R̂` from privacy-safe label sufficient statistics `(m_k, M_k, n_k)` aggregated by count-weighted fusion.
+2. **Training-side:** a structure loss `L_co` aligns the prototype cosine-Gram to `R̂` (co-occurring diseases → nearby prototype directions).
+3. **Inference-side:** a correlation-aware **mean-field decoder** propagates evidence across co-occurring classes (strict improvement over independent sigmoids under correlated labels).
+
+## Algorithms
 
 | Algorithm | Shared Info | Key Mechanism | Paper |
 |-----------|------------|---------------|-------|
-| **FedAvg** | Model weights | Simple weight averaging | AISTATS 2017 |
-| **FedProto** | Class prototypes (point) | Prototype regularization + nearest-neighbor | AAAI 2022 |
-| **FedGMKD** | GMM prototypes | EM-fitted GMM per class + discrepancy-aware aggregation | NeurIPS 2024 |
-| **FedBCS** | Frequency-calibrated prototypes | InstanceNorm-style feature recalibration | AAAI 2026 |
-| **FedSeProto** | Hard-split semantic/domain protos | Two-branch MLP + HSIC mutual info minimization | ECAI 2024 |
+| **FedAvg** | Model weights | Weight averaging | AISTATS 2017 |
+| **FedProx** | Model weights | Weight averaging + proximal term | MLSys 2020 |
+| **FedProto** | Point prototypes | Prototype regularization + nearest-neighbor | AAAI 2022 |
+| **FedGMKD** | GMM prototypes | EM-fitted GMM + discrepancy-aware aggregation | NeurIPS 2024 |
+| **FedBCS** | Frequency-calibrated prototypes | InstanceNorm-style recalibration | AAAI 2026 |
+| **FedSeProto** | Hard-split semantic/domain protos | Two-branch MLP + HSIC | ECAI 2024 |
+| **FedCoP** ★ | Gaussian prototypes + co-occurrence `R̂` | Federated co-occurrence structure + mean-field decode | **Proposed** |
 
-### Proposed Method: D²-FL
+### FedCoP ablations (isolate the contribution)
 
-| Algorithm | Shared Info | Key Innovation |
-|-----------|------------|----------------|
-| **D²-FL** | Gaussian prototypes `N(mu, sigma^2)` (semantic-only when disentangled) | Distributional prototypes + Semantic-Style disentanglement + Bayesian fusion + Proto EMA + Temperature scaling |
-
-Key features of D²-FL:
-
-- **Distributional Prototypes** — each class prototype is modeled as a Gaussian distribution `N(mu, sigma^2)`, capturing per-client uncertainty
-- **Semantic-Style Disentanglement** — features are decomposed into semantic (disease-relevant, shared) and style (hospital-specific, local) subspaces via a learnable soft gate
-- **Disentanglement Enforcement** — four complementary losses ensure clean separation:
-  - *HSIC Independence* — statistical decorrelation between semantic and style features
-  - *Gate Entropy Regularization* — encourages decisive 0/1 gate assignments per dimension
-  - *Orthogonal Constraint* — prevents information leakage between subspaces
-  - *Adversarial Domain Invariance* — semantic features fool a domain classifier via gradient reversal
-  - *Contrastive Semantic Alignment* — InfoNCE loss clusters same-disease semantic features across clients
-- **Bayesian Fusion** — precision-weighted aggregation: clients with lower variance get higher weight
-- **Prototype Calibration** — Huber loss ensures log-variance honestly reflects actual uncertainty
-- **Entropy Regularization** — prevents variance collapse back to point prototypes (logvar → -∞)
-- **Prototype EMA Momentum** — exponential moving average of global prototypes for stability
-- **Adaptive Lambda Warmup** — gradual increase of prototype loss weight to avoid early bias
-- **Per-Class Temperature Scaling** — learnable per-class temperature for calibrated prototype-distance inference
-- **Implicit Privacy Protection** — three mechanisms combine to protect client data without adding explicit noise:
-  - *Distributional prototypes* encode per-client uncertainty via variance parameters — a high-variance client naturally reveals less about its training data
-  - *Semantic-style disentanglement* ensures only disease-relevant features leave the client; hospital-specific style features stay local
-  - *Prototype-level sharing* avoids transmitting raw model weights or gradients, providing stronger privacy than weight-sharing FL
-  - These mechanisms offer *de facto* privacy benefits without the utility loss of formal DP noise — see [Privacy](#privacy) section for detailed analysis
-- **Multi-label Classification** — adapted for Chest X-ray diagnosis (14 disease labels per image)
-- **Task Heterogeneity** — each client sees only a subset of disease classes (Non-IID label skew)
+| Variant | Flag | Isolates |
+|---|---|---|
+| `fedcop_nocoo` | `--no_cooccurrence` | total co-occurrence contribution (`R̂=I`) |
+| `fedcop_local` | `--local_cooc_only` | necessity of federated `R̂` aggregation |
+| `fedcop_nolco` | `--no_lco` | training-side `L_co` vs inference-side decoder |
 
 ## Requirements
 
-- Python 3.7+
-- PyTorch 1.7+
-- Torchvision 0.8+
-- NumPy, Pandas, Pillow, tqdm
-- scikit-learn, matplotlib (for visualization)
+- Python 3.8+, PyTorch 2.0+, Torchvision 0.15+
+- NumPy, Pandas, Pillow, tqdm, scikit-learn (metrics)
 
-See [requirements.txt](requirements.txt) for the full list.
+See [requirements.txt](requirements.txt). Tested on a single NVIDIA 4090 (Linux).
 
 ## Data Preparation
 
 Download the [NIH ChestX-ray14 dataset](https://nihcc.app.box.com/v/ChestXray-NIHCC) and extract to:
 
 ```
-../data/chestxray/
+./data/chestxray/
   images/
     00000001_000.png
-    00000002_000.png
     ...
   Data_Entry_2017.csv
 ```
 
-The `--data_dir` flag controls the root data directory (default: `../data/`).
+`--data_dir` controls the root (default `./data/`).
 
 ## Project Structure
 
 ```
-D²-FL/
+FedCoP/
 ├── exps/
-│   └── federated_main.py          # Main entry point (6 algorithms)
+│   └── federated_main.py          # Main entry point (7 algorithms + dispatch)
 ├── lib/
 │   ├── options.py                 # Argument parsing
-│   ├── utils.py                   # Data loading, prototype aggregation
-│   ├── update.py                  # Local training, test inference
+│   ├── utils.py                   # Data loading, prototype aggregation, exp_details
+│   ├── update.py                  # Local training, test inference (all algorithms)
+│   ├── metrics.py                 # Multi-label metrics (AUROC/F1/Hamming/subset)
 │   ├── sampling.py                # IID/Non-IID data partitioning
 │   ├── chestxray.py               # ChestXray14 dataset class
 │   ├── visualize.py               # t-SNE prototype visualization
 │   ├── models/
-│   │   └── resnet.py              # D2FLResNet / ResNet50 backbone
-│   ├── dist_proto/
-│   │   ├── proto_head.py          # ProbabilisticProtoHead + PerClassTemperature
-│   │   ├── losses.py              # KL / Wasserstein / MSE / Calibration / Entropy reg
-│   │   ├── aggregation.py         # Bayesian precision-weighted fusion
-│   │   └── disentangle.py         # DisentangledProtoHead + LearnableGate + HSIC + Adversarial + Contrastive
-│   └── dp/
-│       └── __init__.py            # Privacy notes (DP code removed; see Privacy section)
+│   │   └── resnet.py              # FedCoPResNet / ResNet50 backbone
+│   └── dist_proto/
+│       ├── proto_head.py          # ProbabilisticProtoHead (Gaussian μ/logvar)
+│       ├── losses.py              # KL / Wasserstein / MSE / Entropy reg
+│       ├── aggregation.py         # Bayesian precision-weighted fusion
+│       └── structured.py          # ★ Co-occurrence stat / fusion / L_co / mean-field decode
 ├── figures/                       # Architecture diagrams
 ├── paper/                         # Paper & theory documentation
 ├── scripts/
-│   └── run.sh                     # Launch script (6 algorithms)
+│   ├── run.sh                     # Full benchmark (3 seeds, mean±std)
+│   └── run_test.sh                # Smoke test (5 rounds, single seed)
 ├── requirements.txt
 └── README.md
 ```
 
 ## Running
 
-Select the algorithm via `--alg` (default: `d2fl`). All algorithms use pretrained ResNet-50 backbone.
+Select the algorithm via `--alg` (default: `fedcop`). All algorithms use a pretrained ResNet-50 backbone.
 
-### Baselines
+### Quick smoke test
 ```bash
-# FedProto (original, point prototypes only)
-python exps/federated_main.py --alg fedproto \
-    --ways 5 --shots 100 --num_users 20 --rounds 200 --ld 1.0
-
-# FedAvg
-python exps/federated_main.py --alg fedavg \
-    --ways 5 --shots 100 --num_users 20 --rounds 200
-
-# FedGMKD (GMM prototypes + discrepancy-aware aggregation)
-python exps/federated_main.py --alg fedgmkd \
-    --gmm_components 3 --ways 5 --num_users 20 --rounds 200
-
-# FedBCS (frequency-domain style recalibration)
-python exps/federated_main.py --alg fedbcs \
-    --ways 5 --num_users 20 --rounds 200
-
-# FedSeProto (hard-split semantic-domain decoupling + HSIC)
-python exps/federated_main.py --alg fedseproto \
-    --mi_lambda 0.05 --ways 5 --num_users 20 --rounds 200
+bash scripts/run_test.sh           # all algorithms, 5 rounds, single seed
+bash scripts/run_test.sh fedcop    # only FedCoP
 ```
 
-### Proposed: D²-FL
+### Full benchmark (3 seeds, mean±std summary)
 ```bash
-# Point prototype mode (FedProto baseline)
-python exps/federated_main.py --alg d2fl \
-    --ways 5 --shots 100 --num_users 20 --rounds 200 --ld 1.0
+bash scripts/run.sh                # all algorithms + ablations
+bash scripts/run.sh fedcop         # only FedCoP across 3 seeds
+```
 
-# Distributional prototype (Gaussian)
-python exps/federated_main.py --alg d2fl \
-    --use_distributional --dist_type kl \
-    --ways 5 --rounds 200 --ld 1.0
+### Individual algorithms
+```bash
+# Baselines
+python exps/federated_main.py --alg fedavg
+python exps/federated_main.py --alg fedprox --fedprox_mu 0.01
+python exps/federated_main.py --alg fedproto
+python exps/federated_main.py --alg fedgmkd --gmm_components 3
+python exps/federated_main.py --alg fedbcs
+python exps/federated_main.py --alg fedseproto --mi_lambda 0.05
 
-# Disentanglement mode (semantic-style separation)
-python exps/federated_main.py --alg d2fl \
-    --use_disentangle --sem_ratio 0.75 --dis_lambda 0.05 \
-    --ways 5 --rounds 200 --ld 1.0
+# FedCoP (proposed)
+python exps/federated_main.py --alg fedcop \
+    --co_lambda 0.1 --cov_shrinkage 0.1 --co_beta 1.0 --co_mf_steps 2 \
+    --ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 --ld_warmup 20
 
-# Full D²-FL (distributional + disentangled + all enhancements)
-python exps/federated_main.py --alg d2fl \
-    --use_distributional --dist_type kl \
-    --use_disentangle --dis_lambda 0.05 \
-    --cal_lambda 0.01 --contra_lambda 0.05 --adv_lambda 0.01 --ent_lambda 0.001 \
-    --proto_momentum 0.9 --temperature 1.0 --ld_warmup 50 \
-    --ways 5 --num_users 20 --rounds 100
+# FedCoP ablations
+python exps/federated_main.py --alg fedcop --no_cooccurrence    # R̂ = I
+python exps/federated_main.py --alg fedcop --local_cooc_only    # per-client local R̂
+python exps/federated_main.py --alg fedcop --no_lco             # training-side L_co off
 ```
 
 ## Options
 
-### Algorithm Selection
+### Algorithm & Federated
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--alg` | d2fl | FL algorithm: fedavg / fedproto / fedgmkd / fedbcs / fedseproto / d2fl |
-
-### Federated Learning
-| Parameter | Default | Description |
-|-----------|---------|-------------|
+| `--alg` | fedcop | fedavg / fedprox / fedproto / fedgmkd / fedbcs / fedseproto / fedcop |
 | `--rounds` | 100 | Global communication rounds |
 | `--num_users` | 20 | Number of clients |
-| `--frac` | 0.25 | Fraction of clients participating per round |
+| `--frac` | 0.25 | Fraction of clients per round |
 | `--train_ep` | 1 | Local epochs per round |
 | `--local_bs` | 4 | Local batch size |
 | `--lr` | 0.01 | Learning rate |
-| `--momentum` | 0.5 | SGD momentum |
-| `--optimizer` | sgd | Optimizer: sgd / adam |
 | `--seed` | 1234 | Random seed |
 
-### Model
+### Model & Data
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--model` | resnet50 | Backbone: resnet50 |
-| `--num_classes` | 14 | Number of classes |
-| `--proto_dim` | 256 | Prototype vector dimension |
+| `--num_classes` | 14 | Number of pathologies |
+| `--proto_dim` | None→256 | Prototype dimension |
 | `--image_size` | 224 | Input image size |
-| `--pretrained` | True | Use ImageNet pretrained ResNet-50 |
-
-### Task Heterogeneity
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--ways` | 3 | Avg classes per client |
+| `--pretrained` | True | ImageNet pretrained ResNet-50 |
+| `--ways` | 3 | Avg classes per client (Non-IID) |
 | `--shots` | 100 | Avg samples per class per client |
-| `--stdev` | 2 | Std deviation of ways/shots |
-| `--iid` | 0 | Use IID split (0 = Non-IID) |
-| `--unequal` | 0 | Unequal data amounts across clients |
+| `--stdev` | 2 | Std of ways/shots across clients |
 
-### Prototype Learning (FedProto / D²-FL shared)
+### Distributional Prototypes
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--ld` | 1.0 | Prototype loss weight lambda |
-| `--proto_dim` | 256 | Prototype vector dimension |
-| `--ft_round` | 10 | Fine-tuning rounds |
+| `--use_distributional` | False | Gaussian prototypes (FedCoP forces True) |
+| `--dist_type` | kl | kl / wasserstein / mse |
+| `--ld` | 1.0 | Prototype loss weight λ |
+| `--ld_warmup` | 50 | Proto loss warmup rounds |
+| `--proto_momentum` | 0.9 | EMA momentum (prototypes + R̂) |
+| `--temperature` | 1.0 | Inference temperature T |
+| `--ent_lambda` | 1e-3 | Entropy reg weight (anti-collapse) |
 
-### Distributional Prototypes (D²-FL only)
+### FedCoP Co-occurrence (core)
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--use_distributional` | False | Enable Gaussian prototypes `N(mu, sigma^2)` |
-| `--dist_type` | kl | Distance type: kl / wasserstein / mse |
+| `--co_lambda` | 0.1 | Structure loss L_co weight |
+| `--cov_shrinkage` | 0.1 | R̂ shrinkage η toward identity |
+| `--co_rank` | 0 | Low-rank approx rank (0 = full) |
+| `--co_beta` | 1.0 | Mean-field coupling strength β |
+| `--co_mf_steps` | 2 | Mean-field iterations |
+| `--no_cooccurrence` | False | Ablation: R̂=I, structure off |
+| `--local_cooc_only` | False | Ablation: per-client local R̂ (no federation) |
+| `--no_lco` | False | Ablation: training-side L_co off |
 
-### Disentanglement (D²-FL only)
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--use_disentangle` | False | Enable semantic-style disentanglement |
-| `--sem_ratio` | 0.75 | Target semantic dimension ratio |
-| `--dis_lambda` | 0.05 | Disentanglement loss weight (HSIC + gate entropy + orthogonal) |
-| `--cal_lambda` | 0.01 | Prototype calibration loss weight |
-| `--contra_lambda` | 0.05 | Contrastive semantic alignment loss weight |
-| `--adv_lambda` | 0.01 | Adversarial domain invariance loss weight |
-| `--ent_lambda` | 0.001 | Entropy regularization weight (prevents variance collapse) |
-
-### Training/Inference Strategy (D²-FL only)
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--proto_momentum` | 0.9 | Global prototype EMA momentum |
-| `--ld_warmup` | 50 | Proto loss weight warmup rounds |
-| `--temperature` | 1.0 | Proto inference temperature |
-| `--use_per_class_temp` | True | Per-class learnable temperature |
-
-### Algorithm-Specific
+### Baseline-specific
 | Parameter | Default | Applies To | Description |
 |-----------|---------|------------|-------------|
+| `--fedprox_mu` | 0.01 | FedProx | Proximal term coefficient |
 | `--gmm_components` | 3 | FedGMKD | GMM components per class |
-| `--mi_lambda` | 0.05 | FedSeProto | MI minimization loss weight |
-| `--pretrained` | True | All | Use ImageNet pretrained ResNet-50 |
-| `--stopping_rounds` | 10 | All | Early stopping patience |
-| `--test_ep` | 10 | All | Test evaluation interval |
+| `--mi_lambda` | 0.05 | FedSeProto | MI minimization weight |
 
-## Key Features
+## Method summary
 
-### 5 Baselines + D²-FL Proposed Method
+FedCoP's local objective is intentionally minimal (4 losses):
 
-All algorithms use **ImageNet pretrained ResNet-50** backbone.
+$$\mathcal{L} = L_{CE} + \lambda_{\text{eff}}\,L_{proto} + \lambda_{co}\,L_{co} + \lambda_{ent}\,L_{ent}$$
 
-| Algorithm | Type | Server Aggregation | Local Objective |
-|-----------|------|-------------------|-----------------|
-| **FedAvg** | Weight-sharing | Weight averaging | `L_BCE` |
-| **FedProto** | Prototype-sharing (baseline) | Prototype averaging | `L_BCE + lambda * MSE(proto, global_proto)` |
-| **FedGMKD** | Prototype-sharing (baseline) | Discrepancy-aware GMM fusion | `L_BCE + lambda * GMM_proto_loss` |
-| **FedBCS** | Prototype-sharing (baseline) | Prototype averaging | `L_BCE + freq-domain style recalibration` |
-| **FedSeProto** | Prototype-sharing (baseline) | Semantic-only proto averaging | `L_BCE + lambda * MSE + HSIC MI min` |
-| **D²-FL** | Prototype-sharing (proposed) | Bayesian fusion | `L_BCE + lambda * KL/Wasserstein + L_dis + L_cal + L_contra + L_adv + L_ent` |
+- **L_CE**: multi-label BCE classification.
+- **L_proto**: KL between local and global diagonal-Gaussian prototypes (per positive label).
+- **L_co**: co-occurrence structure alignment — prototype cosine-Gram ↔ federated `R̂`.
+- **L_ent**: anti-collapse entropy regularization.
 
-### D²-FL vs FedProto
+The co-occurrence matrix `R̂` is estimated from label counts `(m_k, M_k, n_k)` (privacy-safe, no features), aggregated by count-weighted phi-correlation + shrinkage + EMA. At inference, a mean-field decoder uses `R̂` to propagate evidence across co-occurring classes.
 
-| Feature | FedProto (baseline) | D²-FL (proposed) |
-|---------|-------------------|-------------------|
-| Backbone | Pretrained ResNet-50 | Pretrained ResNet-50 |
-| Prototype type | Point vector | Gaussian `N(mu, sigma^2)` |
-| Aggregation | Simple averaging | Precision-weighted Bayesian fusion |
-| Uncertainty | Not modeled | Per-client variance |
-| Disentanglement | None | Learnable soft gate: semantic vs. style |
-| HSIC Independence | None | Cross-covariance Frobenius norm |
-| Adversarial Domain Inv. | None | Gradient reversal on semantic features |
-| Contrastive Alignment | None | InfoNCE with Jaccard similarity |
-| Calibration | None | Huber loss on logvar vs. distance |
-| Entropy Regularization | None | `-logvar.mean()` prevents variance collapse |
-| Privacy | N/A | Distributional encoding + semantic disentanglement (implicit) |
-| Proto Momentum | None | EMA `G_t = beta*G_{t-1} + (1-beta)*G_new` |
-| Lambda Schedule | Constant | Warmup: `ld * min(1, round/warmup)` |
-| Inference Temp | 1.0 (none) | Per-class learnable or global configurable |
-| Distance | MSE | KL / Wasserstein / MSE |
+**Removed from prior D²-FL** (analyzed as redundant/dead): per-class temperature (dead code), adversarial domain loss (redundant), InfoNCE contrastive (overlaps L_proto+L_CE), calibration loss (collapsed logvar to scalar), and semantic-style disentanglement (orthogonal story line). See `paper/` for the full analysis and theory (decoder-regret bound + federated-estimation theorem).
 
-### D²-FL Complete Loss Function
+## Evaluation metrics
 
-The full D²-FL local training objective (7 loss terms):
-
-$$\mathcal{L} = \underbrace{\mathcal{L}_{\text{BCE}}}_{\text{classification}} + \lambda_{\text{eff}} \cdot \underbrace{\mathcal{L}_{\text{proto}}}_{\text{prototype align}} + \lambda_{\text{dis}} \cdot \underbrace{\mathcal{L}_{\text{dis}}}_{\text{disentangle}} + \lambda_{\text{cal}} \cdot \underbrace{\mathcal{L}_{\text{cal}}}_{\text{calibration}} + \lambda_{\text{contra}} \cdot \underbrace{\mathcal{L}_{\text{contra}}}_{\text{contrastive}} + \lambda_{\text{adv}} \cdot \underbrace{\mathcal{L}_{\text{adv}}}_{\text{adversarial}} + \lambda_{\text{ent}} \cdot \underbrace{\mathcal{L}_{\text{ent}}}_{\text{entropy reg}}$$
-
-Where:
-- **L_BCE**: Multi-label binary cross-entropy
-- **L_proto**: Distributional prototype distance (KL / Wasserstein / MSE) between local and global prototypes
-- **L_dis**: Disentanglement = HSIC independence + gate entropy + orthogonal constraint
-- **L_cal**: Calibration = Huber(logvar_mean, log(||mu - global_mu||^2))
-- **L_contra**: Contrastive = InfoNCE with Jaccard similarity positive pairs
-- **L_adv**: Adversarial = BCE on gradient-reversed semantic features (target=uniform)
-- **L_ent**: Entropy regularization = -logvar.mean() (prevents variance → 0)
-
-### Prototype Learning
-Instead of sharing model weights, FedProto and D²-FL share **class prototypes** — feature vectors from the penultimate layer. This enables:
-- Communication efficiency (256-dim vectors vs millions of weights)
-- Model-heterogeneous FL support
-
-### Multi-label Evaluation
-Two test modes for prototype-based methods:
-1. **Local model**: `sigmoid(logits) > 0.5` (only works for client's own classes)
-2. **Global prototypes**: distance to each global prototype as pseudo-logit (zero-shot for unseen classes)
-
-For weight-sharing methods, evaluation uses per-client local model sigmoid threshold classification.
-
-## Privacy
-
-D²-FL achieves **implicit privacy protection** without explicit differential privacy mechanisms. Three design choices work together:
-
-### 1. Distributional Prototypes → Uncertainty as Privacy
-
-By modeling each class prototype as a Gaussian distribution `N(mu, sigma^2)` rather than a point vector:
-
-- **Per-client variance** encodes how much the client's data deviates from the consensus — a client with outlier data will naturally have higher variance, revealing less about individual samples
-- **Bayesian fusion** aggregates prototypes by *precision* (1/sigma^2) — low-variance clients contribute more, high-variance clients contribute less. This means clients that "stand out" are automatically de-weighted
-- **Entropy regularization** prevents variance collapse (`logvar → -∞`), ensuring the distributional representation is genuinely used instead of degenerating back to point prototypes
-
-*Key insight*: adding Gaussian noise (as in formal DP) is mathematically equivalent to increasing the variance of a Gaussian distribution. D²-FL already learns per-client variance — a natural mechanism for bounding information leakage.
-
-### 2. Semantic Disentanglement → Only Disease Features Leave the Client
-
-The disentanglement module decomposes features into:
-
-| Subspace | Contains | Shared? |
-|----------|----------|---------|
-| **Semantic** `z_sem` | Disease-relevant patterns (e.g., opacity, nodule shape) | Yes — uploaded as prototype |
-| **Style** `z_style` | Hospital-specific artifacts (scanner type, lighting, patient demographics) | No — stays local |
-
-This means:
-- The server **never sees** client-specific style information
-- Prototypes encode only disease semantics — useless for reconstructing individual images
-- The four enforcement mechanisms (HSIC independence, gate entropy, adversarial invariance, contrastive alignment) ensure this separation is genuine, not superficial
-
-### 3. Prototype-Level Sharing → Minimal Information Transfer
-
-Unlike FedAvg which transmits full model weights (millions of parameters), D²-FL shares only:
-
-- Per-class prototypes: typically 256-dimensional vectors × number of classes
-- When disentangled: only the semantic subspace (e.g., 192 dims) is shared — style features stay local
-
-This provides **orders of magnitude less** information leakage than weight-sharing FL. Combined with distributional encoding and disentanglement, D²-FL offers strong *de facto* privacy without the **utility penalty** of formal DP noise injection.
-
-### Comparison with Explicit DP
-
-| Aspect | Formal DP (e.g., Gaussian mechanism) | D²-FL Implicit Privacy |
-|--------|--------------------------------------|------------------------|
-| Mechanism | Clipping + noise injection | Variance encoding + disentanglement |
-| Guarantee | (epsilon, delta)-DP (provable) | De facto privacy (empirical) |
-| Utility impact | Significant accuracy drop at strong epsilon | No accuracy penalty |
-| Information leaked | Bounded by epsilon | Bounded by prototype dimensionality + variance |
-| Client-specific protection | Uniform noise across all clients | Adaptive: high-variance clients reveal less |
-
-For deployment scenarios requiring **formal** privacy guarantees, D²-FL's architecture is compatible with additional DP layers (the prototype structure is naturally amenable to Gaussian mechanism perturbation with lower noise due to reduced dimensionality in the semantic subspace). However, for most medical FL scenarios, the implicit privacy of distributional prototypes + disentanglement provides strong practical protection.
+Beyond the legacy per-label accuracy, FedCoP reports full multi-label metrics (macro/micro AUROC, macro/micro F1, Hamming loss, subset accuracy, per-class AUROC) via `lib/metrics.py`, computed on the correlation-aware prototype-decode probabilities.
 
 ## Citation
 
-**FedProto:**
-```
-@inproceedings{tan2021fedproto,
+```bibtex
+@inproceedings{tan2022fedproto,
   title={FedProto: Federated Prototype Learning across Heterogeneous Clients},
   author={Tan, Yue and Long, Guodong and Liu, Lu and Zhou, Tianyi and Lu, Qinghua and Jiang, Jing and Zhang, Chengqi},
-  booktitle={AAAI Conference on Artificial Intelligence},
-  year={2022}
+  booktitle={AAAI}, year={2022}
+}
+@inproceedings{li2020fedprox,
+  title={Federated Optimization in Heterogeneous Networks},
+  author={Li, Tian and Sahu, Anit Kumar and Zaheer, Manzil and Sanjabi, Maziar and Talwalkar, Ameet and Smith, Virginia},
+  booktitle={MLSys}, year={2020}
 }
 ```
-
-**FedAvg:**
-```
-@inproceedings{mcmahan2017communication,
-  title={Communication-Efficient Learning of Deep Networks from Decentralized Data},
-  author={McMahan, Brendan and Moore, Eider and Ramage, Daniel and Hampson, Seth and y Arcas, Blaise Aguera},
-  booktitle={AISTATS},
-  year={2017}
-}
-```
-

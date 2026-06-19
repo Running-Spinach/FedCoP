@@ -330,6 +330,8 @@ def exp_details(args):
     print(f'    Local Epochs       : {args.train_ep}\n')
 
     # 基线算法专属配置
+    if args.alg == 'fedprox':
+        print(f'    FedProx mu         : {getattr(args, "fedprox_mu", 0.01)}')
     if args.alg == 'fedgmkd':
         print(f'    GMM components     : {getattr(args, "gmm_components", 3)}')
     if args.alg == 'fedbcs':
@@ -337,27 +339,31 @@ def exp_details(args):
     if args.alg == 'fedseproto':
         print(f'    MI lambda           : {getattr(args, "mi_lambda", 0.05)}')
 
-    # FedProto / D²-FL 专属配置
+    # FedProto / FedCoP 专属配置
     if args.alg == 'fedproto':
         print('    Prototype mode     : Point (baseline)')
-    if args.alg == 'd2fl':
-        if getattr(args, 'use_distributional', False):
-            print('    Prototype mode     : Distributional')
-            print(f'    Distribution type   : {args.dist_type}')
-        else:
-            print('    Prototype mode     : Distributional (disabled, using point)')
+    if args.alg == 'fedcop':
+        print('    Prototype mode     : Distributional (Gaussian)')
+        print(f'    Distribution type   : {args.dist_type}')
         if getattr(args, 'proto_dim', None):
             print(f'    Proto dim           : {args.proto_dim}')
 
-        # D²-FL 增强特性
+        # FedCoP 共现结构参数
+        print(f'    Co-occurrence lambda: {getattr(args, "co_lambda", 0.1)}')
+        print(f'    Cov shrinkage eta   : {getattr(args, "cov_shrinkage", 0.1)}')
+        print(f'    MF coupling beta    : {getattr(args, "co_beta", 1.0)}')
+        print(f'    MF steps            : {getattr(args, "co_mf_steps", 2)}')
         print(f'    Proto momentum      : {getattr(args, "proto_momentum", 0.9)}')
         print(f'    LD warmup rounds    : {getattr(args, "ld_warmup", 50)}')
         print(f'    Temperature         : {getattr(args, "temperature", 1.0)}')
 
-        if getattr(args, 'use_disentangle', False):
-            sem_ratio = getattr(args, 'sem_ratio', 0.75)
-            print(f'    Prototype disentangle : Enabled (sem={sem_ratio:.0%}, style={(1-sem_ratio):.0%})')
-            print(f'    Disentangle lambda    : {getattr(args, "dis_lambda", 0.05)}')
+        # 消融模式提示
+        if getattr(args, 'no_cooccurrence', False):
+            print('    ABLATION            : no_cooccurrence (R=I, structure OFF)')
+        if getattr(args, 'local_cooc_only', False):
+            print('    ABLATION            : local_cooc_only (no federated R aggregation)')
+        if getattr(args, 'no_lco', False):
+            print('    ABLATION            : no_lco (training-side L_co OFF)')
 
     print(f'    Pretrained backbone : {getattr(args, "pretrained", True)}')
 

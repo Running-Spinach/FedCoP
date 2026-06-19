@@ -1,16 +1,16 @@
 # =============================================================================
-# 功能：D²-FL 本地更新模块
+# 功能:FedCoP 本地更新模块
 # =============================================================================
-# 这个文件是联邦学习中"客户端本地训练"的核心，包含了：
+# 这个文件是联邦学习中"客户端本地训练"的核心,包含:
 #   1. DatasetSplit — 数据集分割工具
-#   2. LocalUpdate — 客户端本地训练类（含所有算法的训练函数）
+#   2. LocalUpdate — 客户端本地训练类(含所有算法的训练函数)
 #   3. 评估函数 — 多标签测试推理
 #   4. 三个基线算法 — FedGMKD, FedBCS, FedSeProto
 #
-# 最重要的函数是 update_weights_D2FL（第6个方法），它是 D²-FL 的核心训练逻辑。
-# 建议阅读顺序：
-#   先看 DatasetSplit → LocalUpdate.__init__ → update_weights_D2FL
-#   → test_inference_new_het_lt_D2FL
+# 最重要的函数是 update_weights_FedCoP,FedCoP 的核心训练逻辑。
+# 建议阅读顺序:
+#   先看 DatasetSplit → LocalUpdate.__init__ → update_weights_FedCoP
+#   → test_inference_FedCoP
 # =============================================================================
 
 import torch
@@ -25,11 +25,10 @@ lib_dir = (Path(__file__).parent).resolve()
 if str(lib_dir) not in sys.path:
     sys.path.insert(0, str(lib_dir))
 from dist_proto.losses import (distributional_proto_loss,
-                                 prototype_calibration_loss,
                                  entropy_regularization)
-from dist_proto.disentangle import (disentanglement_loss,
-                                     contrastive_semantic_loss,
-                                     adversarial_disentanglement_loss)
+from dist_proto.structured import (cos_gram_structure_loss,
+                                     mean_field_decode)
+from metrics import compute_multilabel_metrics, format_metrics
 
 
 # =============================================================================
@@ -97,7 +96,7 @@ class LocalUpdate(object):
     - update_weights_FedP      → FedProto（点原型基线）
     - update_weights_fedprox   → FedProx
     - update_weights_scaffold  → SCAFFOLD
-    - update_weights_D2FL      → D²-FL（提出方法）★ 核心
+    - update_weights_FedCoP    → FedCoP(提出方法)★ 核心
     - _update_weights_FedGMKD  → FedGMKD（GMM 基线）
     - _update_weights_FedBCS   → FedBCS（频域风格重校准基线）
     - _update_weights_FedSeProto → FedSeProto（语义-域解耦基线）
@@ -217,7 +216,7 @@ class LocalUpdate(object):
 
         损失 = L_CE + ld × L_proto（MSE 原型距离）
 
-        这是 D²-FL 的对比基线。和 D²-FL 的核心区别：
+        这是 FedCoP 的对比基线。和 FedCoP 的核心区别：
         - 点原型（MSE 距离）vs 分布原型（KL/Wasserstein 距离）
         - 无解耦 vs 语义-风格解耦
         - 无 EMA 动量 vs 原型动量
@@ -464,370 +463,134 @@ class LocalUpdate(object):
         return model.state_dict(), avg_loss, acc_val.item(), c_local_new, c_delta
 
     # ═══════════════════════════════════════════════════════════════════════════
-    #  D²-FL 增强版本地训练 ★★★ 核心函数 ★★★
+    #  FedCoP 本地训练 ★★★ 核心函数 ★★★
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def update_weights_D2FL(self, args, idx, global_protos, model, global_round=round, ld=None):
-        """D²-FL 增强版本地训练：端到端分布原型 + 语义-风格解耦
+    def update_weights_FedCoP(self, args, idx, global_protos, global_R,
+                              model, global_round=round, ld=None):
+        """FedCoP 本地训练:分布原型对齐 + 共现结构对齐(4 项损失,精简版)
 
-        这是 D²-FL 算法最核心的函数，包含了论文中提出的所有创新点。
+        FedCoP 相比旧版(FedProto + 分布原型)砍掉了解耦/对抗/对比/校准/每类温度等冗余 trick,
+        只保留 4 项各有明确职责的损失:
 
-        ═══════════════════════════════════════════════════════════════
-        总损失函数（最多7项，根据配置组合）：
-        ═══════════════════════════════════════════════════════════════
+            L = L_CE + λ_eff·L_proto + λ_co·L_co + λ_ent·L_ent
 
-        L_total = L_CE            ← 1. 分类损失（基础任务）
-                + λ    × L_proto  ← 2. 分布原型对齐（本地→全局）
-                + λ_dis × L_dis   ← 3. 解耦独立性（HSIC+门控熵+正交）
-                + λ_cal × L_cal   ← 4. 原型校准（方差说真话）
-                + λ_ctr × L_contra← 5. 对比语义对齐（同类拉近）
-                + λ_adv × L_adv   ← 6. 对抗域不变（语义不含域信息）
-                + λ_ent × L_ent   ← 7. 熵正则（防止方差坍缩）
+            1. L_CE   : 多标签分类损失(BCE),做好本职分类
+            2. L_proto: 分布原型对齐(本地对角高斯 → 全局对角高斯,KL),让本地
+                        原型不跑离全局共识;λ_eff 由 warmup 控制
+            3. L_co   : 共现结构对齐(NEW,核心)——把本 batch 各类原型均值的余弦
+                        Gram 对齐到联邦共现相关矩阵 R̂ 的子块。共现类原型方向相近,
+                        互斥类远离。替代了被砍的对比/对抗损失,动机更干净
+            4. L_ent  : 熵正则,防止方差坍缩回点原型(小权重 guardrail)
 
-        ═══════════════════════════════════════════════════════════════
-        各损失项的直观理解：
-        ═══════════════════════════════════════════════════════════════
+        上传:每见类的 (μ_c, logvar_c)(供服务器贝叶斯融合)。
+        共现统计 (m_k, M_k, n_k) 只依赖标签,在服务器端 taskheter 里从各客户端
+        标签矩阵直接计算(等价于客户端上传,且更精确)。
 
-        1. L_CE (Cross Entropy)：
-           做好分类本职。就像医生必须正确诊断疾病。
-
-        2. L_proto (Distributional Prototype Loss)：
-           本地原型不要跑太远。就像各医院对疾病的认知要和全球共识对齐。
-           用 KL/Wasserstein 距离代替 MSE，因为分布原型有方差信息。
-
-        3. L_dis (Disentanglement Loss)：
-           语义和风格要分开。就像把歌谱（语义）和嗓音（风格）分离，
-           只上传歌谱（语义原型），不上传嗓音（风格特征）。
-           包含三个子项：
-           - HSIC：统计独立性（语义和风格不相关）
-           - 门控熵：鼓励门控接近 0/1（态度鲜明）
-           - 正交约束：语义和风格子空间垂直（信息不泄漏）
-
-        4. L_cal (Calibration Loss)：
-           方差要说真话。距离全局原型远时要诚实地说"我不确定"（方差异大），
-           近时才可以说"我确定"（方差小）。
-
-        5. L_contra (Contrastive Semantic Loss)：
-           同类疾病的语义特征要彼此靠近，异类要远离。
-           在 Non-IID 场景下，不同客户端可能没见过彼此的病例，
-           对比损失确保"肺炎"在所有医院的语义空间中都聚在一起。
-
-        6. L_adv (Adversarial Domain Loss)：
-           对抗训练确保语义特征不含域信息。
-           域分类器尝试从语义特征猜出来源医院 → 梯度反转 →
-           语义特征被训练成"谁也猜不出它是从哪来的"。
-
-        7. L_ent (Entropy Regularization)：
-           防止方差退化回点原型。logvar→ -∞ 时 σ²→0，
-           高斯原型坍塌成点原型，分布原型的优势全部丢失。
-
-        ═══════════════════════════════════════════════════════════════
         参数:
-        ═══════════════════════════════════════════════════════════════
             args:          全局配置
-            idx:           客户端索引（用于日志）
-            global_protos: 全局原型字典（服务器下发）
-                          {label: (mu, logvar)} 或 {label: vector}
-            model:         当前模型（D2FLResNet 实例）
-            global_round:  全局训练轮次
-            ld:            原型损失权重。None 则用 args.ld
+            idx:           客户端索引(日志)
+            global_protos: 全局原型字典 {label: (mu, logvar)}
+            global_R:      全局共现相关矩阵 R̂ (C, C);首轮/无结构消融时为 None
+            model:         当前 FedCoPResNet
+            global_round:  全局轮次
+            ld:            原型损失权重(已含 warmup)。None 用 args.ld
 
-        ═══════════════════════════════════════════════════════════════
         返回:
-        ═══════════════════════════════════════════════════════════════
-            state_dict:       更新后的模型参数
-            epoch_loss:       损失字典
-                            {total, 1(CE), 2(proto), 3(dis),
-                             cal, contra, adv, ent}
-            acc_val:          最后一个 batch 的准确率
-            agg_protos_label: 聚合后的本地原型，准备上传给服务器
+            state_dict, epoch_loss{total,1,2,co,ent}, acc_val, agg_protos_label
         """
         if ld is None:
             ld = args.ld
-
         model.train()
 
-        # ── 初始化损失记录字典 ──
-        # 每个键对应一个损失分量，值为各 epoch 平均损失的列表
-        epoch_loss = {'total': [], '1': [], '2': [], '3': [],
-                       'cal': [], 'contra': [], 'adv': [], 'ent': []}
+        # ── 损失记录 ──
+        epoch_loss = {'total': [], '1': [], '2': [], 'co': [], 'ent': []}
 
-        # ── 读取配置开关 ──
-        use_dist = getattr(args, 'use_distributional', False)  # 是否用高斯分布原型
-        use_dis = getattr(args, 'use_disentangle', False)      # 是否用语义-风格解耦
-        # 各损失权重（小默认值，避免训练初期被辅助损失主导）
-        dis_lambda = getattr(args, 'dis_lambda', 0.05)
-        cal_lambda = getattr(args, 'cal_lambda', 0.01)
-        contra_lambda = getattr(args, 'contra_lambda', 0.05)
-        adv_lambda = getattr(args, 'adv_lambda', 0.01)
-        ent_lambda = getattr(args, 'ent_lambda', 0.001)
+        # ── 配置开关 ──
+        dist_type = getattr(args, 'dist_type', 'kl')
+        co_lambda = getattr(args, 'co_lambda', 0.1)
+        ent_lambda = getattr(args, 'ent_lambda', 1e-3)
+        no_lco = getattr(args, 'no_lco', False)          # 消融:关闭 L_co
+        loss_mse = nn.MSELoss()
 
-        # ── 选择优化器 ──
+        # R̂ 移到当前设备(首轮 None 时跳过)
+        R_dev = global_R.to(self.device) if global_R is not None else None
+
         optimizer = self._get_optimizer(model)
 
         # ═══════════════════════════════════════════════════════════════
         #  本地训练循环
         # ═══════════════════════════════════════════════════════════════
         for iter in range(self.args.train_ep):
-            batch_loss = {'total': [], '1': [], '2': [], '3': [],
-                           'cal': [], 'contra': [], 'adv': [], 'ent': []}
-            agg_protos_label = {}  # 本轮收集的本地原型
+            batch_loss = {'total': [], '1': [], '2': [], 'co': [], 'ent': []}
+            agg_protos_label = {}
 
             for batch_idx, (images, label_g) in enumerate(self.trainloader):
                 images, labels = images.to(self.device), label_g.to(self.device)
-
                 model.zero_grad()
-                # 解耦模式下需要 gate 值（用于门控熵正则）
-                output = model(images, return_gate=use_dis)
 
-                # ─────────────────────────────────────────────────
-                #  解析模型输出（根据配置解析不同格式）
-                # ─────────────────────────────────────────────────
-                gate = None
-                if use_dis and use_dist:
-                    # 解耦 + 分布原型（最完整模式）：
-                    # output = (logits, μ_full, logvar_full,
-                    #           μ_sem, logvar_sem, μ_style, logvar_style, gate)
-                    (logits, _mu_full, _logvar_full,
-                     mu_sem, logvar_sem, mu_style, logvar_style, gate) = output
-                    proto_for_share = (mu_sem, logvar_sem)     # 上传语义高斯原型
-                    proto_for_style = (mu_style, logvar_style)  # 风格高斯原型（本地保留）
-                elif use_dis:
-                    # 解耦 + 点原型：
-                    # output = (logits, z_full, z_sem, z_style, gate)
-                    logits, _z_full, z_sem, z_style, gate = output
-                    proto_for_share = z_sem       # 上传语义点原型
-                    proto_for_style = z_style     # 风格点原型（本地保留）
-                elif use_dist:
-                    # 仅分布原型（无解耦）：
-                    # output = (logits, mu, logvar)
-                    logits, mu, logvar = output
-                    proto_for_share = (mu, logvar)  # 上传高斯原型
-                else:
-                    # 仅点原型（退化回 FedProto）：
-                    # output = (logits, protos)
-                    logits, protos = output
-                    proto_for_share = protos          # 上传点原型
+                # 单一前向模式:始终 (logits, mu, logvar)
+                logits, mu, logvar = model(images)
 
-                # ─────────────────────────────────────────────────
-                #  L1: 分类损失（始终计算）
-                # ─────────────────────────────────────────────────
+                # ── L1: 多标签分类损失 ──
                 loss1 = self.criterion(logits, labels)
 
-                # ─────────────────────────────────────────────────
-                #  L3: 解耦独立性损失（核心创新 1）
-                # ─────────────────────────────────────────────────
-                # 包括 HSIC 独立性 + 门控熵 + 正交约束
-                # 目标：让语义和风格"各走各的路"，彼此不相关
-                if use_dis:
-                    if use_dist:
-                        # 分布模式下用语义和风格的高斯均值计算解耦损失
-                        loss3 = disentanglement_loss(
-                            mu_sem, mu_style,
-                            gate=gate,
-                            proto_dim=getattr(args, 'proto_dim', 256) or 256
-                        )
-                    else:
-                        # 点原型模式下用语义和风格的特征向量
-                        loss3 = disentanglement_loss(
-                            z_sem, z_style,
-                            gate=gate,
-                            proto_dim=getattr(args, 'proto_dim', 256) or 256
-                        )
-                else:
-                    loss3 = 0.0 * loss1  # 零损失（保持计算图兼容）
-
-                # ─────────────────────────────────────────────────
-                #  L2: 分布原型正则化损失
-                # ─────────────────────────────────────────────────
-                # 计算本地原型到全局原型的距离。
-                # 解耦模式下只对语义原型计算（风格原型不参与全局聚合）。
-                loss_mse = nn.MSELoss()
+                # ── L2: 分布原型对齐(KL/Wasserstein)──
+                # 逐样本、逐正标签,把本地高斯拉向全局高斯
                 if len(global_protos) == 0:
-                    # 第一轮训练，全局原型还没建立
-                    loss2 = 0 * loss1
+                    loss2 = 0.0 * loss1
                 else:
-                    # 根据四种模式选择不同的原型距离计算方式
-                    if use_dist and use_dis:
-                        # 模式A：分布原型 + 解耦 → KL/Wasserstein 距离
-                        # 只计算语义原型（μ_sem, logvar_sem）到全局原型的距离
-                        loss2 = 0.0
-                        count = 0
-                        for i_lbl in range(len(labels)):
-                            for lbl_idx in range(args.num_classes):
-                                if labels[i_lbl, lbl_idx] > 0 and lbl_idx in global_protos:
-                                    g_val = global_protos[lbl_idx]
-                                    g_mu, g_logvar = (g_val if isinstance(g_val, tuple)
-                                                      else (g_val, torch.zeros_like(g_val)))
-                                    # 使用分布原型损失（KL/Wasserstein）
-                                    l2 = distributional_proto_loss(
-                                        mu_sem[i_lbl:i_lbl + 1], logvar_sem[i_lbl:i_lbl + 1],
-                                        g_mu.unsqueeze(0), g_logvar.unsqueeze(0),
-                                        dist_type=args.dist_type
-                                    )
-                                    loss2 += l2
-                                    count += 1
-                        loss2 = loss2 / max(count, 1)
+                    loss2 = 0.0
+                    count = 0
+                    for i_lbl in range(len(labels)):
+                        for lbl_idx in range(args.num_classes):
+                            if labels[i_lbl, lbl_idx] > 0 and lbl_idx in global_protos:
+                                g_val = global_protos[lbl_idx]
+                                g_mu, g_logvar = (g_val if isinstance(g_val, tuple)
+                                                  else (g_val, torch.zeros_like(g_val)))
+                                l2 = distributional_proto_loss(
+                                    mu[i_lbl:i_lbl + 1], logvar[i_lbl:i_lbl + 1],
+                                    g_mu.unsqueeze(0), g_logvar.unsqueeze(0),
+                                    dist_type=dist_type)
+                                loss2 = loss2 + l2
+                                count += 1
+                    loss2 = loss2 / max(count, 1)
 
-                    elif use_dis:
-                        # 模式B：点原型 + 解耦 → MSE 距离（仅语义原型）
-                        loss2 = 0.0
-                        count = 0
-                        for i_lbl in range(len(labels)):
-                            proto_i = z_sem[i_lbl]
-                            for lbl_idx in range(args.num_classes):
-                                if labels[i_lbl, lbl_idx] > 0 and lbl_idx in global_protos:
-                                    loss2 += loss_mse(proto_i, global_protos[lbl_idx])
-                                    count += 1
-                        loss2 = loss2 / max(count, 1)
-
-                    elif use_dist:
-                        # 模式C：分布原型（无解耦）→ KL/Wasserstein 距离
-                        loss2 = 0.0
-                        count = 0
-                        for i_lbl in range(len(labels)):
-                            for lbl_idx in range(args.num_classes):
-                                if labels[i_lbl, lbl_idx] > 0 and lbl_idx in global_protos:
-                                    g_mu, g_logvar = global_protos[lbl_idx]
-                                    l2 = distributional_proto_loss(
-                                        mu[i_lbl:i_lbl + 1], logvar[i_lbl:i_lbl + 1],
-                                        g_mu.unsqueeze(0), g_logvar.unsqueeze(0),
-                                        dist_type=args.dist_type
-                                    )
-                                    loss2 += l2
-                                    count += 1
-                        loss2 = loss2 / max(count, 1)
-
-                    else:
-                        # 模式D：点原型（无解耦）→ 退化回 FedProto 的 MSE 距离
-                        loss2 = 0.0
-                        count = 0
-                        for i_lbl in range(len(labels)):
-                            proto_i = protos[i_lbl]
-                            for lbl_idx in range(args.num_classes):
-                                if labels[i_lbl, lbl_idx] > 0 and lbl_idx in global_protos:
-                                    loss2 += loss_mse(proto_i, global_protos[lbl_idx])
-                                    count += 1
-                        loss2 = loss2 / max(count, 1)
-
-                # ─────────────────────────────────────────────────
-                #  L_cal: 原型校准损失（核心创新 1+）
-                # ─────────────────────────────────────────────────
-                # 确保方差"说真话"：距离远 → 方差大，距离近 → 方差小
-                if use_dist and cal_lambda > 0 and len(global_protos) > 0:
-                    if use_dis:
-                        loss_cal = prototype_calibration_loss(
-                            mu_sem, logvar_sem, labels, global_protos,
-                            dist_type=args.dist_type, num_classes=args.num_classes
-                        )
-                    else:
-                        loss_cal = prototype_calibration_loss(
-                            mu, logvar, labels, global_protos,
-                            dist_type=args.dist_type, num_classes=args.num_classes
-                        )
+                # ── L_co: 共现结构对齐(核心创新)──
+                # 用本 batch 各类原型均值的余弦 Gram 对齐 R̂ 子块
+                if (not no_lco) and R_dev is not None and co_lambda > 0:
+                    loss_co = cos_gram_structure_loss(
+                        mu, labels, R_dev, args.num_classes)
                 else:
-                    loss_cal = 0.0 * loss1
+                    loss_co = 0.0 * loss1
 
-                # ─────────────────────────────────────────────────
-                #  L_contra: 对比语义对齐损失（核心创新 2+）
-                # ─────────────────────────────────────────────────
-                # 用 InfoNCE 风格的对比学习：同类别语义特征拉近，异类推开
-                # 这对 Non-IID FL 特别重要：即使不同客户端数据分布不同，
-                # 相同疾病的语义表征也应在语义空间中接近
-                if use_dis and contra_lambda > 0:
-                    if use_dist:
-                        loss_contra = contrastive_semantic_loss(mu_sem, labels)
-                    else:
-                        loss_contra = contrastive_semantic_loss(z_sem, labels)
-                else:
-                    loss_contra = 0.0 * loss1
-
-                # ─────────────────────────────────────────────────
-                #  L_adv: 对抗域不变损失（核心创新 2++）
-                # ─────────────────────────────────────────────────
-                # 语义特征经过梯度反转后，域分类器应该猜不出来源。
-                # 当域分类器输出 → 0（猜不出），loss → 最小。
-                if use_dis and adv_lambda > 0:
-                    if use_dist:
-                        domain_logits = model.forward_adversarial(
-                            mu_sem, grad_reverse_lambda=1.0)
-                    else:
-                        domain_logits = model.forward_adversarial(
-                            z_sem, grad_reverse_lambda=1.0)
-                    if domain_logits is not None:
-                        loss_adv = adversarial_disentanglement_loss(domain_logits)
-                    else:
-                        loss_adv = 0.0 * loss1
-                else:
-                    loss_adv = 0.0 * loss1
-
-                # ─────────────────────────────────────────────────
-                #  L_ent: 熵正则（防止方差坍缩回点原型）
-                # ─────────────────────────────────────────────────
-                # 最小化 -logvar = 最大化熵 = 鼓励保留不确定性
-                if use_dist and ent_lambda > 0:
-                    if use_dis:
-                        loss_ent = entropy_regularization(logvar_sem)
-                    else:
-                        loss_ent = entropy_regularization(logvar)
+                # ── L_ent: 熵正则(防方差坍缩)──
+                if ent_lambda > 0:
+                    loss_ent = entropy_regularization(logvar)
                 else:
                     loss_ent = 0.0 * loss1
 
-                # ─────────────────────────────────────────────────
-                #  总损失：七项损失加权求和
-                # ─────────────────────────────────────────────────
-                loss = (loss1                              # 分类（主任务）
-                        + loss2 * ld                       # 原型对齐（权重 warmup）
-                        + loss3 * dis_lambda               # 解耦独立性
-                        + loss_cal * cal_lambda            # 原型校准
-                        + loss_contra * contra_lambda       # 对比语义对齐
-                        + loss_adv * adv_lambda             # 对抗域不变
-                        + loss_ent * ent_lambda)            # 熵正则
+                # ── 总损失(4 项)──
+                loss = (loss1
+                        + loss2 * ld
+                        + loss_co * co_lambda
+                        + loss_ent * ent_lambda)
 
-                # 反向传播 + 参数更新
                 loss.backward()
                 optimizer.step()
 
-                # ─────────────────────────────────────────────────
-                #  按标签聚合本地原型（准备上传给服务器）
-                # ─────────────────────────────────────────────────
-                # 解耦模式下仅聚合语义原型（风格原型留在本地）
-                if use_dis:
-                    if use_dist:
-                        sem_feat = mu_sem      # 语义高斯均值
-                    else:
-                        sem_feat = z_sem       # 语义特征
-                    for i_lbl in range(len(labels)):
-                        for lbl_idx in range(args.num_classes):
-                            if label_g[i_lbl, lbl_idx] > 0:
-                                if use_dist:
-                                    # 上传 (μ_sem, logvar_sem) 高斯参数对
-                                    proto_val = (sem_feat[i_lbl, :].detach(),
-                                                 logvar_sem[i_lbl, :].detach())
-                                else:
-                                    # 上传点原型
-                                    proto_val = sem_feat[i_lbl, :].detach()
-                                if lbl_idx in agg_protos_label:
-                                    agg_protos_label[lbl_idx].append(proto_val)
-                                else:
-                                    agg_protos_label[lbl_idx] = [proto_val]
-                else:
-                    # 无解耦模式：上传完整原型
-                    for i_lbl in range(len(labels)):
-                        for lbl_idx in range(args.num_classes):
-                            if label_g[i_lbl, lbl_idx] > 0:
-                                if use_dist:
-                                    proto_val = (mu[i_lbl, :].detach(),
-                                                 logvar[i_lbl, :].detach())
-                                else:
-                                    proto_val = protos[i_lbl, :].detach()
-                                if lbl_idx in agg_protos_label:
-                                    agg_protos_label[lbl_idx].append(proto_val)
-                                else:
-                                    agg_protos_label[lbl_idx] = [proto_val]
+                # ── 收集本地原型(按正标签分组,准备上传)──
+                for i_lbl in range(len(labels)):
+                    for lbl_idx in range(args.num_classes):
+                        if label_g[i_lbl, lbl_idx] > 0:
+                            proto_val = (mu[i_lbl, :].detach(),
+                                         logvar[i_lbl, :].detach())
+                            if lbl_idx in agg_protos_label:
+                                agg_protos_label[lbl_idx].append(proto_val)
+                            else:
+                                agg_protos_label[lbl_idx] = [proto_val]
 
-                # ── 计算准确率 ──
-                # 多标签：每个标签独立用 sigmoid > 0.5 判断
+                # ── per-label 准确率 ──
                 preds = (torch.sigmoid(logits) > 0.5).float()
                 acc_val = (preds == labels).float().mean()
 
@@ -836,30 +599,23 @@ class LocalUpdate(object):
                         global_round, idx, iter, batch_idx * len(images),
                         len(self.trainloader.dataset),
                         100. * batch_idx / len(self.trainloader),
-                        loss.item(),
-                        acc_val.item()))
+                        loss.item(), acc_val.item()))
 
-                # ── 记录各损失分量 ──
+                # ── 记录损失分量 ──
                 def _val(v):
-                    """安全取值：torch.Tensor 取 .item()，标量直接返回"""
                     return v.item() if isinstance(v, torch.Tensor) else v
-
                 batch_loss['total'].append(loss.item())
                 batch_loss['1'].append(loss1.item())
                 batch_loss['2'].append(_val(loss2))
-                batch_loss['3'].append(_val(loss3))
-                batch_loss['cal'].append(_val(loss_cal))
-                batch_loss['contra'].append(_val(loss_contra))
-                batch_loss['adv'].append(_val(loss_adv))
+                batch_loss['co'].append(_val(loss_co))
                 batch_loss['ent'].append(_val(loss_ent))
 
-            # ── Epoch 级别损失平均 ──
+            # ── Epoch 级平均 ──
             for key in epoch_loss:
                 if len(batch_loss[key]) > 0:
-                    epoch_loss[key].append(
-                        sum(batch_loss[key]) / len(batch_loss[key]))
+                    epoch_loss[key].append(sum(batch_loss[key]) / len(batch_loss[key]))
 
-        # ── 全局平均（所有 epoch 的平均）──
+        # ── 全局平均(所有 epoch)──
         for key in epoch_loss:
             if len(epoch_loss[key]) > 0:
                 epoch_loss[key] = sum(epoch_loss[key]) / len(epoch_loss[key])
@@ -1034,164 +790,139 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
 
 
 # =============================================================================
-#  D²-FL 多标签测试推理 ★★★ 核心评估函数 ★★★
+#  FedCoP 多标签测试推理 ★★★ 核心评估函数 ★★★
 # =============================================================================
 
-def test_inference_new_het_lt_D2FL(args, local_model_list, test_dataset, classes_list, user_groups_gt, global_protos=[], temperature=None):
-    """D²-FL 多标签联邦学习测试推理
+def test_inference_FedCoP(args, local_model_list, test_dataset, classes_list,
+                          user_groups_gt, global_protos=[], global_R=None,
+                          global_pi=None, local_R_dict=None, temperature=None):
+    """FedCoP 测试推理:模型分类器 + 相关性感知原型解码 + 完整多标签指标
 
-    这个函数做两件事：
-    1. 用模型自身的分类器评估（sigmoid(logits) > 0.5）
-    2. 用全局原型做最近邻分类评估（计算特征到每个全局原型的距离 → sigmoid）
-
-    两种评估各有意义：
-    - 模型自身分类：反映本地模型训练效果（受本地数据分布影响）
-    - 原型最近邻分类：反映全局原型的泛化能力（跨客户端通用性更好）
-
-    原型推理流程：
-        1. 模型前向 → 提取语义特征（解耦模式）或完整特征（非解耦模式）
-        2. 计算特征到每个全局原型的距离
-           - 分布原型：使用马氏距离（考虑方差）
-           - 点原型：使用 MSE 距离
-        3. 将距离转为 logit：logit = -distance / temperature
-           - 温度越小 → logit 对距离越敏感 → 越"自信"
-        4. sigmoid(logit) > 0.5 → 多标签预测
+    两条评估路径:
+      1. 模型自身分类器:sigmoid(logits) > 0.5
+      2. 全局原型 + mean-field 结构化解码:
+           - 每类用对角马氏距离到全局原型 → 独立 logit s_c
+           - 用共现相关矩阵 R̂ 做 mean-field 迭代,在共现类间传播证据
+           - R̂=I 或 --no_cooccurrence 时退化为独立 sigmoid(消融基线)
+    并在原型解码概率上计算 AUROC/F1/Hamming/subset 等完整指标。
 
     参数:
-        args:              全局配置
-        local_model_list:  所有客户端的模型列表
-        test_dataset:      测试数据集
-        classes_list:      每个客户端拥有的类别列表（用于过滤）
-        user_groups_gt:    测试数据的客户端划分
-        global_protos:     全局原型字典 {label: (mu, logvar)} 或 {label: vector}
-        temperature:       原型推理温度系数。None 时从 args 读取，默认 1.0
-                          T > 1: 软化（更平滑），T < 1: 锐化（更确信）
+        args:           全局配置
+        local_model_list: 各客户端模型
+        test_dataset:    测试集
+        classes_list:    每客户端类别(过滤用)
+        user_groups_gt:  测试数据客户端划分
+        global_protos:   全局原型 {label: (mu, logvar)}
+        global_R:        全局共现相关矩阵 (C, C)
+        global_pi:       全局边际先验 (C,)
+        local_R_dict:    {idx: (R_k, pi_k)} —— 仅 --local_cooc_only 消融时用
+        temperature:     马氏距离→logit 的温度。None 用 args.temperature
 
     返回:
-        acc_list_l: 各客户端用自身模型的 per-label 准确率
-        acc_list_g: 各客户端用全局原型分类的 per-label 准确率
-        loss_list:  各客户端的原型距离损失
+        acc_list_l:  各客户端模型分类器 per-label 准确率
+        acc_list_g:  各客户端原型解码 per-label 准确率
+        loss_list:   各客户端原型诊断距离
+        metrics_g:   原型解码路径的完整多标签指标 dict
     """
     loss_mse = nn.MSELoss()
-    use_dist = getattr(args, 'use_distributional', False)
-    use_dis = getattr(args, 'use_disentangle', False)
+    device = args.device
     if temperature is None:
         temperature = getattr(args, 'temperature', 1.0)
-    device = args.device
+    # 共现结构开关
+    no_cooc = getattr(args, 'no_cooccurrence', False)
+    local_only = getattr(args, 'local_cooc_only', False)
+    beta = getattr(args, 'co_beta', 1.0)
+    mf_steps = getattr(args, 'co_mf_steps', 2)
 
-    def _extract_proto_feat(output):
-        """从模型输出中提取用于原型比对的语义特征向量
+    C = args.num_classes
+    eye = torch.eye(C, device=device)
+    # 全局 R̂ / pi(本地消融时按客户端覆盖)
+    R_glb = global_R.to(device) if global_R is not None else eye
+    pi_glb = global_pi.to(device) if global_pi is not None else torch.zeros(C, device=device)
 
-        D2FLResNet 输出格式（return_gate=False 推理模式）:
-          解耦+分布: (logits, μ_full, logvar_full, μ_sem, logvar_sem, μ_style, logvar_style)
-                     → 取 output[3] = μ_sem（语义均值才是我们要比对的原型）
-          解耦+点:   (logits, z_full, z_sem, z_style)
-                     → 取 output[2] = z_sem（语义特征）
-          分布:      (logits, mu, logvar)
-                     → 取 output[1] = mu（分布均值）
-          点:        (logits, proto_features)
-                     → 取 output[1] = proto_features（点原型）
-        """
-        if use_dis and use_dist:
-            return output[3]   # μ_sem
-        elif use_dis:
-            return output[2]   # z_sem
-        elif use_dist and len(output) >= 3:
-            return output[1]   # mu
-        else:
-            return output[1]   # proto_features
-
-    acc_list_g = []
-    acc_list_l = []
-    loss_list = []
+    acc_list_g, acc_list_l, loss_list = [], [], []
+    # 跨客户端累积概率/标签,用于整体指标
+    all_probs_g, all_labels_g = [], []
 
     for idx in range(args.num_users):
         model = local_model_list[idx]
         model.to(device)
         testloader = DataLoader(DatasetSplit(test_dataset, user_groups_gt[idx]),
-                                batch_size=64, shuffle=True)
+                                batch_size=64, shuffle=False)
 
-        # ════════════════════════════════════════════════════════════
-        #  测试方式1：模型自身分类器
-        # ════════════════════════════════════════════════════════════
+        # 选定本客户端使用的 R̂ / pi(本地共现消融 vs 全局)
+        if local_only and local_R_dict is not None and idx in local_R_dict:
+            R_use, pi_use = local_R_dict[idx]
+            R_use = R_use.to(device)
+            pi_use = pi_use.to(device)
+        elif no_cooc:
+            R_use, pi_use = eye, pi_glb            # 无结构:独立解码
+        else:
+            R_use, pi_use = R_glb, pi_glb
+
+        # ════════ 方式1:模型自身分类器 ════════
         model.eval()
         total_val, correct_val = 0.0, 0.0
-        for batch_idx, (images, labels) in enumerate(testloader):
+        for images, labels in testloader:
             images, labels = images.to(device), labels.to(device)
-            model.zero_grad()
             output = model(images)
-            outputs = output[0] if isinstance(output, tuple) else output
+            logits = output[0]
+            preds = (torch.sigmoid(logits) > 0.5).float()
+            correct_val += (preds == labels).float().sum().item()
+            total_val += labels.numel()
+        acc_list_l.append(correct_val / max(total_val, 1))
 
-            # 多标签二值预测：每个标签独立 sigmoid > 0.5
-            preds = (torch.sigmoid(outputs) > 0.5).float()
+        # ════════ 方式2:全局原型 + mean-field 结构化解码 ════════
+        model.eval()
+        total_val, correct_val = 0.0, 0.0
+        diag_loss = 0.0
+        for images, labels in testloader:
+            images, labels = images.to(device), labels.to(device)
+            output = model(images)
+            logits, mu, logvar = output[0], output[1], output[2]
+            proto_feats = mu                       # 用分布均值作为查询特征
+            B = images.shape[0]
+
+            # 逐样本逐类:对角马氏距离 → 独立 logit s_c
+            s = torch.zeros(B, C, device=device)
+            for j in range(C):
+                if j in global_protos:
+                    g_mu, g_logvar = global_protos[j]
+                    g_var = torch.exp(g_logvar) + 1e-8
+                    # e_j = 0.5 * Σ_d (x_d − μ_jd)² / σ²_jd  (B,)
+                    e_j = 0.5 * (((proto_feats - g_mu) ** 2) / g_var).sum(dim=1)
+                    s[:, j] = -e_j / temperature
+                    # 诊断:平均马氏距离
+                    diag_loss += e_j.mean().item()
+
+            # 相关性感知 mean-field 解码(R̂=I 时退化为独立 sigmoid)
+            q = mean_field_decode(s, R_use, pi_use, beta=beta, steps=mf_steps)
+
+            preds = (q > 0.5).float()
             correct_val += (preds == labels).float().sum().item()
             total_val += labels.numel()
 
-        acc = correct_val / total_val
-        print('| User: {} | Test Acc w/o protos (per-label): {:.4f}'.format(idx, acc))
-        acc_list_l.append(acc)
+            all_probs_g.append(q.detach().cpu())
+            all_labels_g.append(labels.detach().cpu())
 
-        # ════════════════════════════════════════════════════════════
-        #  测试方式2：全局原型最近邻分类
-        # ════════════════════════════════════════════════════════════
-        model.eval()
-        total_val, correct_val = 0.0, 0.0
-        loss2 = torch.tensor(0.0)
-        for batch_idx, (images, labels) in enumerate(testloader):
-            images, labels = images.to(device), labels.to(device)
-            model.zero_grad()
-            output = model(images)
+        acc_list_g.append(correct_val / max(total_val, 1))
+        loss_list.append(diag_loss / max(len(testloader), 1))
 
-            outputs = output[0]           # 分类 logits
-            proto_feats = _extract_proto_feat(output)  # 原型特征
+        print('| User: {} | Test Acc w/o protos (per-label): {:.4f} | '
+              'w/ protos(structured): {:.4f}'.format(
+                  idx, acc_list_l[-1], acc_list_g[-1]))
 
-            # 计算到每个全局原型的距离 → 转为 logit → sigmoid 预测
-            proto_logits = torch.zeros(images.shape[0], args.num_classes, device=device)
-            for i in range(images.shape[0]):
-                for j in range(args.num_classes):
-                    if j in global_protos:
-                        if use_dist:
-                            # 分布原型：马氏距离（考虑方差信息）
-                            g_mu, g_logvar = global_protos[j]
-                            g_var = torch.exp(g_logvar) + 1e-8
-                            # 归一化距离 = Σ (x - μ)² / σ²（每个维度被方差加权）
-                            dist = 0.5 * (((proto_feats[i, :] - g_mu) ** 2) / g_var).sum()
-                        else:
-                            # 点原型：MSE 距离
-                            dist = loss_mse(proto_feats[i, :], global_protos[j])
-                        # 距离 → logit（负相关：距离越小，logit 越大，越可能是正类）
-                        proto_logits[i, j] = -dist / temperature
+    # ── 原型解码路径的完整多标签指标 ──
+    probs_all = torch.cat(all_probs_g, dim=0).numpy()
+    labels_all = torch.cat(all_labels_g, dim=0).numpy()
+    metrics_g = compute_multilabel_metrics(probs_all, labels_all, num_classes=C)
+    print('[FedCoP prototype-decode metrics] ' + format_metrics(metrics_g))
 
-            # sigmoid + 阈值 → 多标签预测
-            preds = (torch.sigmoid(proto_logits) > 0.5).float()
-            correct_val += (preds == labels).float().sum().item()
-            total_val += labels.numel()
-
-            # 记录平均原型距离损失（用于诊断全局原型质量）
-            if len(global_protos) > 0:
-                loss2 = 0.0
-                count = 0
-                for lbl_idx in global_protos:
-                    if use_dist:
-                        g_mu, g_logvar = global_protos[lbl_idx]
-                        g_var = torch.exp(g_logvar) + 1e-8
-                        loss2 += 0.5 * (((proto_feats - g_mu.unsqueeze(0)) ** 2) / (g_var.unsqueeze(0) + 1e-8)).mean().item()
-                    else:
-                        loss2 += loss_mse(proto_feats, global_protos[lbl_idx]).item()
-                    count += 1
-                loss2 = loss2 / max(count, 1)
-
-        acc = correct_val / total_val
-        print('| User: {} | Test Acc with protos (per-label): {:.4f}'.format(idx, acc))
-        acc_list_g.append(acc)
-        loss_list.append(loss2)
-
-    return acc_list_l, acc_list_g, loss_list
-
+    return acc_list_l, acc_list_g, loss_list, metrics_g
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  FedGMKD (NeurIPS 2024): GMM-based Prototype Federated Learning
-#  对比基线，核心区别于 D²-FL:
+#  对比基线，核心区别于 FedCoP:
 #    - GMM 后处理拟合（EM 算法在 detach 特征上运行），而非端到端 NN 输出
 #    - 多分量高斯原型（每类 K 个高斯分量）vs 单高斯 + 校准
 #    - Discrepancy-Aware Aggregation (质量+数量联合加权) vs Bayesian Fusion
@@ -1203,9 +934,9 @@ def _fit_gmm_pytorch(features, n_components=3, n_iters=10):
     这是 FedGMKD 的核心后处理步骤：在 detach 的特征上做 GMM 拟合，
     得到多峰高斯原型 (weights, means, logvars)。
 
-    和 D²-FL 的端到端方式的本质区别：
+    和 FedCoP 的端到端方式的本质区别：
     - FedGMKD: 先提取特征（detach）→ 后处理 GMM → 上传 GMM 参数
-    - D²-FL: 网络直接输出 (μ, σ²) → 端到端反向传播
+    - FedCoP: 网络直接输出 (μ, σ²) → 端到端反向传播
 
     参数:
         features:      (N, D) 特征矩阵
@@ -1255,7 +986,7 @@ def _update_weights_FedGMKD(self, args, idx, global_protos, model, global_round=
     """FedGMKD 本地训练：GMM 后处理原型 + 质量感知聚合
 
     损失 = L_CE + ld × L_gmm_proto
-    和 D²-FL 的关键区别：GMM 在 detach 特征上用 EM 拟合，不可端到端学习。
+    和 FedCoP 的关键区别：GMM 在 detach 特征上用 EM 拟合，不可端到端学习。
     """
     if ld is None:
         ld = args.ld
@@ -1350,7 +1081,7 @@ def _update_weights_FedGMKD(self, args, idx, global_protos, model, global_round=
 def _agg_func_FedGMKD(protos, n_components=3):
     """FedGMKD 本地聚合：对每类特征拟合 GMM → (weights, means, logvars)
 
-    这是 FedGMKD 区别于 D²-FL 的核心后处理步骤。
+    这是 FedGMKD 区别于 FedCoP 的核心后处理步骤。
     """
     agg = {}
     for label, proto_list in protos.items():
@@ -1359,6 +1090,7 @@ def _agg_func_FedGMKD(protos, n_components=3):
         else:
             feats = torch.stack(proto_list)
 
+        device = feats.device
         if feats.shape[0] >= n_components:
             weights, means, logvars = _fit_gmm_pytorch(
                 feats, n_components=n_components, n_iters=10)
@@ -1367,7 +1099,8 @@ def _agg_func_FedGMKD(protos, n_components=3):
             # 样本不足时退化为单高斯
             mu_avg = feats.mean(dim=0)
             logvar_avg = torch.log(feats.var(dim=0, unbiased=False) + 1e-8)
-            agg[label] = (torch.ones(1), mu_avg.unsqueeze(0), logvar_avg.unsqueeze(0))
+            agg[label] = (torch.ones(1, device=device),
+                          mu_avg.unsqueeze(0), logvar_avg.unsqueeze(0))
     return agg
 
 
@@ -1390,14 +1123,15 @@ def _proto_aggregation_FedGMKD(local_protos_list):
         if len(proto_list) == 1:
             global_protos[label] = proto_list[0]
         else:
+            device = all_m[0].device
             all_w, all_m, all_lv, qualities = [], [], [], []
             for entry in proto_list:
                 w, m, lv = entry
                 all_w.append(w); all_m.append(m); all_lv.append(lv)
                 q = 1.0 / (torch.exp(lv).mean() + 1e-8)  # 质量 = 1/平均方差
-                qualities.append(q)
+                qualities.append(q.to(device))
 
-            q_t = torch.tensor(qualities, device=all_m[0].device)
+            q_t = torch.stack(qualities)
             q_sum = q_t.sum() + 1e-8
 
             # 质量加权融合
@@ -1411,7 +1145,7 @@ def _proto_aggregation_FedGMKD(local_protos_list):
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  FedBCS (AAAI 2026): Frequency-Domain Style Recalibration
-#  对比基线，核心区别于 D²-FL:
+#  对比基线，核心区别于 FedCoP:
 #    - 频域风格-内容分离（AdaptiveIN 1D 适配版）vs 可学习门控解耦
 #    - 单一风格重校准 vs HSIC + 对抗 + 对比三重机制
 #    - 点原型 vs 分布原型
@@ -1538,18 +1272,17 @@ def _update_weights_FedBCS(self, args, idx, global_protos, model, global_round=0
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  FedSeProto (ECAI 2024): Semantic-Domain Feature Decoupling
-#  对比基线，核心区别于 D²-FL:
+#  对比基线，核心区别于 FedCoP:
 #    - 硬分割（独立 MLP 编码器，前 N 维语义 + 后 M 维域）vs 软门控
 #    - 仅 HSIC 互信息最小化 vs HSIC + 门控熵 + 正交 + 对抗 + 对比
 #    - 点原型 vs 分布原型
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class FedSeProtoHeads(nn.Module):
-    """FedSeProto 语义-域解耦双头（硬分割方式）
+    """FedSeProto 语义-域解耦双头(硬分割方式)
 
-    和 D²-FL 的 DisentangledProtoHead（软门控）的核心区别：
-    - FedSeProto: 两个独立 MLP '硬'分成语义和域 → sem_dim 固定
-    - D²-FL: 一个可学习门控 '软'分离 → 维度分配由网络学习
+    FedSeProto 基线自带组件:两个独立 MLP '硬'分成语义和域 → sem_dim 固定。
+    (FedCoP 不使用解耦,其跨类结构由共现相关矩阵 R̂ 建模。)
     """
 
     def __init__(self, proto_dim=256, sem_ratio=0.75):
@@ -1572,9 +1305,7 @@ class FedSeProtoHeads(nn.Module):
 def _mi_minimization_loss(z_sem, z_dom):
     """HSIC 互信息最小化 — FedSeProto 的解耦损失
 
-    和 D²-FL 的 disentanglement_loss 的区别：
-    - FedSeProto: 仅 HSIC（交叉协方差 Frobenius 范数）
-    - D²-FL: HSIC + 门控熵 + 正交约束
+    FedSeProto 基线自带:仅 HSIC(交叉协方差 Frobenius 范数)。
     """
     n = z_sem.size(0)
     if n < 2:
@@ -1592,7 +1323,7 @@ def _update_weights_FedSeProto(self, args, idx, global_protos, model, global_rou
 
     损失 = L_CE + ld × L_proto(semantic only) + mi_lambda × L_MI(HSIC)
 
-    关键区别于 D²-FL：
+    关键区别于 FedCoP：
     - 仅共享语义原型（点原型），域特征完全本地
     - 仅 HSIC 互信息最小化（无门控熵、无正交、无对抗、无对比）
     """

@@ -1,5 +1,5 @@
 # =============================================================================
-# 功能：命令行参数解析模块 — D²-FL 联邦学习实验的"遥控器"
+# 功能:命令行参数解析模块 — FedCoP 联邦学习实验的"遥控器"
 # =============================================================================
 # 所有实验配置都通过命令行参数传入，方便做消融实验和超参搜索。
 #
@@ -8,21 +8,24 @@
 #   2. 模型参数 — 骨干网络、算法选择、归一化方式等
 #   3. 数据参数 — 数据集路径、类别数、图像尺寸等
 #   4. Non-IID 参数 — 每客户类别数、每类样本数等
-#   5. D²-FL 专属参数 — 分布原型、解耦、温度等（提出方法的创新点）
+#   5. FedCoP 专属参数 — 共现结构、分布原型等(提出方法的创新点)
 #   6. 差分隐私参数 — DP 保护的可选开关
 #
-# 使用示例：
-#   # 完整 D²-FL 模式
-#   python federated_main.py --alg d2fl --use_distributional --use_disentangle
+# 使用示例:
+#   # FedCoP 完整方法(默认)
+#   python federated_main.py --alg fedcop
 #
-#   # 消融实验：去掉解耦
-#   python federated_main.py --alg d2fl --use_distributional
+#   # 消融:关闭共现结构(R=I,隔离核心贡献)
+#   python federated_main.py --alg fedcop --no_cooccurrence
 #
-#   # 消融实验：去掉分布原型（退化回 FedProto + 预训练）
-#   python federated_main.py --alg d2fl
+#   # 消融:只用本地共现,不联邦聚合(证明联邦聚合必要性)
+#   python federated_main.py --alg fedcop --local_cooc_only
 #
-#   # 带差分隐私
-#   python federated_main.py --alg d2fl --use_dp --dp_epsilon 8
+#   # 消融:关训练侧 L_co,保留推理侧 R̂
+#   python federated_main.py --alg fedcop --no_lco
+#
+#   # 基线对比
+#   python federated_main.py --alg fedprox --fedprox_mu 0.01
 # =============================================================================
 
 import argparse
@@ -35,7 +38,7 @@ def args_parser():
         args: 包含联邦学习实验全部配置参数的 Namespace 对象
     """
     parser = argparse.ArgumentParser(
-        description='D²-FL: Distributional Pathology Prototype Federated Learning'
+        description='FedCoP: Federated Co-occurrence-aware Prototypes'
     )
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -63,11 +66,13 @@ def args_parser():
 
     parser.add_argument('--model', type=str, default='resnet50',
                         help='模型名称: resnet50 / cnn')
-    parser.add_argument('--alg', type=str, default='d2fl',
-                        choices=['fedproto', 'fedavg', 'fedgmkd', 'fedbcs', 'fedseproto', 'd2fl'],
-                        help='FL 算法选择。fedproto=点原型基线, fedavg=经典平均, '
-                             'fedgmkd=GMM原型(NeurIPS2024), fedbcs=频域风格重校准(AAAI2026), '
-                             'fedseproto=语义域解耦(ECAI2024), d2fl=D²-FL提出方法(默认)')
+    parser.add_argument('--alg', type=str, default='fedcop',
+                        choices=['fedproto', 'fedavg', 'fedprox', 'fedgmkd', 'fedbcs',
+                                 'fedseproto', 'fedcop'],
+                        help='FL 算法选择。fedavg=经典平均, fedprox=近端正则基线, '
+                             'fedproto=点原型基线, fedgmkd=GMM原型(NeurIPS2024), '
+                             'fedbcs=频域风格重校准(AAAI2026), fedseproto=语义域解耦(ECAI2024), '
+                             'fedcop=FedCoP 提出方法(默认,共现感知分布原型)')
     parser.add_argument('--num_channels', type=int, default=3,
                         help="图像通道数。ChestX-ray14 原始为灰度图，通过 Grayscale(3) 转为 3 通道。")
     parser.add_argument('--norm', type=str, default='batch_norm',
@@ -127,7 +132,7 @@ def args_parser():
                         help="类别数和样本数的标准差（增大 → 客户端间差异更大）")
 
     # ═══════════════════════════════════════════════════════════════════════════
-    #  6. 原型学习通用参数（FedProto / D²-FL 共用）
+    #  6. 原型学习通用参数(FedProto / FedCoP 共用)
     # ═══════════════════════════════════════════════════════════════════════════
 
     parser.add_argument('--ld', type=float, default=1,
@@ -137,78 +142,68 @@ def args_parser():
                         help="微调轮数（实验性功能，通常不使用）")
 
     # ═══════════════════════════════════════════════════════════════════════════
-    #  7. D²-FL 专属：分布原型参数
+    #  7. 分布原型参数(FedCoP / 基线共用)
     # ═══════════════════════════════════════════════════════════════════════════
 
     parser.add_argument('--use_distributional', action='store_true',
-                        help='[D²-FL] 启用高斯分布原型（替代点原型）。'
-                             '开启后，原型从单向量变为 N(μ, σ²) 高斯分布，'
-                             '支持贝叶斯精度加权融合和不确定性编码。')
+                        help='启用高斯分布原型(替代点原型)。开启后原型变为 N(μ, σ²),'
+                             '支持贝叶斯精度加权融合与不确定性编码。FedCoP 始终启用。')
     parser.add_argument('--dist_type', type=str, default='kl',
                         choices=['kl', 'wasserstein', 'mse'],
-                        help='[D²-FL] 原型距离类型。kl=KL散度（推荐，信息论最优），'
-                             'wasserstein=2-Wasserstein距离（几何视角），'
-                             'mse=仅均值MSE（退化回FedProto行为）。')
+                        help='原型距离类型。kl=KL散度(推荐),'
+                             'wasserstein=2-Wasserstein距离,mse=仅均值MSE(退化回FedProto)。')
     parser.add_argument('--proto_dim', type=int, default=None,
-                        help='[D²-FL] 原型向量维度。None 时自动使用 fc1 输出维度（256）。')
+                        help='原型向量维度。None 时自动使用 fc1 输出维度。')
 
     # ═══════════════════════════════════════════════════════════════════════════
-    #  8. D²-FL 专属：原型解耦参数
+    #  8. FedCoP 专属:共现结构参数(核心创新)
     # ═══════════════════════════════════════════════════════════════════════════
 
-    parser.add_argument('--use_disentangle', action='store_true',
-                        help='[D²-FL] 启用增强原型解耦（语义-风格分离）。'
-                             '包含：可学习门控 + 对抗域不变 + 对比语义对齐。'
-                             '仅上传语义原型，风格特征保留本地。')
-    parser.add_argument('--sem_ratio', type=float, default=0.75,
-                        help='[D²-FL] 语义维度目标占比（0-1）。如 0.75 表示约 75%% 维度分配给语义。'
-                             '注意：这只是正则化引导目标，实际分配由可学习门控决定。')
-    parser.add_argument('--dis_lambda', type=float, default=0.05,
-                        help='[D²-FL] 解耦独立性损失权重 λ_dis。'
-                             '控制 HSIC + 门控熵 + 正交约束在总损失中的占比。')
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    #  9. D²-FL 专属：增强损失权重
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    parser.add_argument('--cal_lambda', type=float, default=0.01,
-                        help='[D²-FL] 原型校准损失权重 λ_cal。'
-                             '鼓励方差反映真实不确定性（logvar ≅ log(distance)）。'
-                             '设为 0 可禁用校准损失。')
-    parser.add_argument('--contra_lambda', type=float, default=0.05,
-                        help='[D²-FL] 对比语义对齐损失权重 λ_ctr。'
-                             '让同类疾病的语义特征在空间中聚集。'
-                             'Non-IID 场景下特别重要。设为 0 可禁用。')
-    parser.add_argument('--adv_lambda', type=float, default=0.01,
-                        help='[D²-FL] 对抗域不变损失权重 λ_adv。'
-                             '确保语义特征不包含域信息（通过梯度反转训练）。'
-                             '设为 0 可禁用对抗训练。')
+    parser.add_argument('--co_lambda', type=float, default=0.1,
+                        help='[FedCoP] 共现结构对齐损失 L_co 的权重 λ_co。'
+                             '把各类原型余弦 Gram 对齐到联邦共现相关矩阵 R̂。'
+                             '设为 0 等价于关闭训练侧结构(--no_lco)。')
+    parser.add_argument('--cov_shrinkage', type=float, default=0.1,
+                        help='[FedCoP] 共现相关矩阵收缩系数 η ∈ [0,1]。'
+                             'R̂=(1−η)R+ηI,拉向单位阵保证正定+小样本稳定。'
+                             'η=1 退化回独立(关闭共现结构)。')
+    parser.add_argument('--co_rank', type=int, default=0,
+                        help='[FedCoP] R̂ 低秩近似的秩。0=全秩(默认,14×14 无需降秩)。')
+    parser.add_argument('--co_beta', type=float, default=1.0,
+                        help='[FedCoP] mean-field 解码的耦合强度 β。'
+                             'β 越大类间证据传播越强;β=0 退化为独立 sigmoid。')
+    parser.add_argument('--co_mf_steps', type=int, default=2,
+                        help='[FedCoP] mean-field 解码迭代步数(通常 1~3 步即收敛)。')
     parser.add_argument('--ent_lambda', type=float, default=0.001,
-                        help='[D²-FL] 熵正则损失权重 λ_ent。'
-                             '防止方差坍缩回点原型（logvar → -∞）。'
-                             '设为 0 可禁用熵正则。')
+                        help='[FedCoP] 熵正则 L_ent 权重。防止方差坍缩回点原型。'
+                             '设为 0 可禁用。')
+
+    # ── FedCoP 消融开关(顶会必需,证明各创新点贡献)──
+    parser.add_argument('--no_cooccurrence', action='store_true',
+                        help='[FedCoP 消融] 关闭共现结构:R̂=I 且 L_co 关。'
+                             '隔离"共现结构"的总贡献(对应论文 R=I 消融)。')
+    parser.add_argument('--local_cooc_only', action='store_true',
+                        help='[FedCoP 消融] 推理时只用各客户端本地共现,不联邦聚合。'
+                             '证明"联邦聚合共现结构"的必要性(核心 FL 论点)。')
+    parser.add_argument('--no_lco', action='store_true',
+                        help='[FedCoP 消融] 关闭训练侧 L_co,但保留推理侧 R̂ 解码。'
+                             '隔离训练侧 vs 推理侧结构的作用。')
 
     # ═══════════════════════════════════════════════════════════════════════════
-    #  10. D²-FL 专属：训练与推理策略
+    #  9. 训练与推理策略
     # ═══════════════════════════════════════════════════════════════════════════
 
     parser.add_argument('--pretrained', action='store_true', default=True,
-                        help='[D²-FL] 使用 ImageNet 预训练 ResNet-50 骨干（默认开启）。'
-                             '预训练骨干提供更好的初始特征表达，加速收敛。')
+                        help='使用 ImageNet 预训练 ResNet-50 骨干(默认开启)。')
     parser.add_argument('--proto_momentum', type=float, default=0.9,
-                        help='[D²-FL] 全局原型 EMA 动量系数。'
-                             '0=无动量（每轮完全替换），0.9=90%%保留旧值。'
-                             '动量越大 → 全局原型越平滑，但更新越慢。')
+                        help='全局原型/共现矩阵 EMA 动量系数。'
+                             '0=无动量(每轮完全替换),0.9=90%%保留旧值。')
     parser.add_argument('--ld_warmup', type=int, default=50,
-                        help='[D²-FL] 原型损失权重 warmup 轮数。'
-                             '前 N 轮 ld 从 0 线性增长到 args.ld。'
-                             '避免训练初期分类器未收敛时，原型损失误导训练。')
+                        help='原型损失权重 warmup 轮数。'
+                             '前 N 轮 ld 从 0 线性增长到 args.ld,避免初期误导训练。')
     parser.add_argument('--temperature', type=float, default=1.0,
-                        help='[D²-FL] 原型推理温度系数 T。'
-                             'logit = -dist / T。T<1 锐化（更敏感），T>1 软化（更平滑）。')
-    parser.add_argument('--use_per_class_temp', action='store_true', default=True,
-                        help='[D²-FL] 启用每类可学习温度参数（默认开启）。'
-                             '每个疾病类别学习自己的最优推理温度。')
+                        help='原型推理温度 T。logit = -dist / T。'
+                             'T<1 锐化(更敏感),T>1 软化(更平滑)。')
 
     # ═══════════════════════════════════════════════════════════════════════════
     #  11. 基线算法专属参数
@@ -219,6 +214,9 @@ def args_parser():
                              'K=1 时退化为单高斯。')
     parser.add_argument('--mi_lambda', type=float, default=0.05,
                         help='[FedSeProto] 互信息最小化损失权重。控制 HSIC 独立性约束的强度。')
+    parser.add_argument('--fedprox_mu', type=float, default=0.01,
+                        help='[FedProx] 近端正则系数 μ。损失 = L_CE + (μ/2)·‖w−w_global‖²。'
+                             'μ 越大本地模型越接近全局模型,Non-IID 下更稳定。')
 
     args = parser.parse_args()
     return args

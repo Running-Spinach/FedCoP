@@ -1,22 +1,24 @@
 #!/bin/bash
 # =============================================================================
-# D²-FL 快速测试脚本 — 精简但报错清晰
+# FedCoP 快速烟测脚本 — 精简但报错清晰(单 seed,验证通路)
 # =============================================================================
 # 用法:
-#   bash ./scripts/run_test.sh           # 运行全部 6 种算法
-#   bash ./scripts/run_test.sh d2fl      # 仅运行指定算法
+#   bash ./scripts/run_test.sh           # 运行全部算法(含 FedCoP 消融)
+#   bash ./scripts/run_test.sh fedcop    # 仅运行指定算法
+#
+# 目的:快速 Bug 检查(4090 上数十分钟跑完全部),非最终结果。
+# 最终结果请用 scripts/run.sh(多 seed)。
 # =============================================================================
-
 set -e
 
 # ── 颜色 ──
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[0;33m'
+CYAN=$'\033[0;36m'
+NC=$'\033[0m'
 
-# ── 快速 Bug 检查参数（4090 上 ~30-50 min 跑完 6 算法）──
+# ── 烟测参数(极小规模,只为验证不崩)──
 ROUNDS=5
 NUM_USERS=5
 WAYS=3
@@ -25,160 +27,112 @@ STDEV=1
 LD=1.0
 FRAC=0.4
 PROTO_DIM=32
+SEED=1234
 
-BASE_ARGS="--num_classes 14 --num_users ${NUM_USERS} --ways ${WAYS} --shots ${SHOTS} --stdev ${STDEV} --rounds ${ROUNDS} --frac ${FRAC} --ld ${LD} --proto_dim ${PROTO_DIM}"
+BASE_ARGS="--num_classes 14 --num_users ${NUM_USERS} --ways ${WAYS} --shots ${SHOTS} \
+--stdev ${STDEV} --rounds ${ROUNDS} --frac ${FRAC} --ld ${LD} --proto_dim ${PROTO_DIM} \
+--train_ep 5 --seed ${SEED}"
+
+FEDCOP_FLAGS="--co_lambda 0.1 --cov_shrinkage 0.1 --co_beta 1.0 --co_mf_steps 2 \
+--ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 --ld_warmup 3"
 
 LOG_DIR="./logs/test_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "${LOG_DIR}"
 
-# 全局追踪
 PASS_COUNT=0
 FAIL_COUNT=0
-declare -a FAIL_NAMES
-declare -a FAIL_MSGS
-
-# ═══════════════════════════════════════════════════════════════════
-#  表头
-# ═══════════════════════════════════════════════════════════════════
+declare -a FAIL_NAMES FAIL_MSGS
 
 print_header() {
     echo ""
     echo "=============================================="
-    echo " D²-FL 快速测试"
-    echo " rounds=${ROUNDS}  users=${NUM_USERS}  ways=${WAYS}  shots=${SHOTS}  proto_dim=${PROTO_DIM}"
+    echo " FedCoP 快速烟测"
+    echo " rounds=${ROUNDS} users=${NUM_USERS} ways=${WAYS} shots=${SHOTS} proto_dim=${PROTO_DIM} seed=${SEED}"
     echo " 日志: ${LOG_DIR}"
     echo "=============================================="
-    printf " %-12s | %-10s | %-8s | %-14s | %s\n" "算法" "状态" "Acc" "耗时" "备注"
-    printf " %-12s-+-%-10s-+-%-8s-+-%-14s-|-%s\n" "------------" "----------" "--------" "--------------" "----------"
+    printf " %-16s | %-8s | %-8s | %-12s | %s\n" "算法" "状态" "Acc" "耗时" "备注"
+    printf " %-16s-+-%-8s-+-%-8s-+-%-12s-|-%s\n" "----------------" "--------" "--------" "------------" "----------"
 }
-
-# ═══════════════════════════════════════════════════════════════════
-#  运行单个算法并提取关键结果
-# ═══════════════════════════════════════════════════════════════════
 
 run_algo() {
     local name="$1"
     local args="$2"
     local log_file="${LOG_DIR}/${name}.log"
 
-    # 启动提示
-    printf " %-12s | ${CYAN}%-10s${NC} | %-8s | ...          |" "${name}" "running..." "..."
+    printf " %-16s | ${CYAN}%-8s${NC} | %-8s | ...         |" "${name}" "running" "..."
 
-    # 运行
     SECONDS=0
     _exit=0
     python exps/federated_main.py ${args} > "${log_file}" 2>&1 || _exit=$?
     local elapsed_min=$(awk "BEGIN {printf \"%.1f\", ${SECONDS} / 60}")
 
-    # ── 提取准确率 ──
-    local acc_proto=$(grep -oP 'with protos.*mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null || echo "")
-    local acc_model=$(grep -oP 'w/o protos.*mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null || echo "")
-    local acc_single=$(grep -oP 'For all users, mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null || echo "")
+    local acc_proto=$(grep -oP 'with protos.*mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null | tail -1 || echo "")
+    local acc_model=$(grep -oP 'w/o protos.*mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null | tail -1 || echo "")
+    local acc_single=$(grep -oP 'For all users, mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null | tail -1 || echo "")
+    local auroc=$(grep -oP 'AUROC\(macro/micro\)=\K[0-9.]+' "${log_file}" 2>/dev/null | tail -1 || echo "")
 
-    # ── 判断成功/失败 ──
     if [ "${_exit}" -ne 0 ]; then
-        # Python 非零退出
-        local err_tail=$(tail -5 "${log_file}" 2>/dev/null)
-        # 提取最后一行 Traceback 中实际有用的错误
-        local err_line=$(grep -E '^[A-Za-z]+Error:|^ModuleNotFoundError:|^NameError:|^ValueError:|^TypeError:|^AttributeError:|^FileNotFoundError:' "${log_file}" 2>/dev/null | tail -1 || echo "exit code ${_exit}")
-
-        printf "\r %-12s | ${RED}%-10s${NC} | %-8s | %-14s | ${RED}%s${NC}\n" \
-            "${name}" "FAIL" "-" "${elapsed_min} min" "${err_line:-(see log)}"
-
-        FAIL_NAMES+=("${name}")
-        FAIL_MSGS+=("${err_line:-(see log)}")
+        local err_line=$(grep -E 'Error:|Exception' "${log_file}" 2>/dev/null | tail -1 || echo "exit ${_exit}")
+        printf "\r %-16s | ${RED}%-8s${NC} | %-8s | %-12s | ${RED}%s${NC}\n" \
+            "${name}" "FAIL" "-" "${elapsed_min}min" "${err_line:0:40}"
+        FAIL_NAMES+=("${name}"); FAIL_MSGS+=("${err_line}")
         ((FAIL_COUNT++))
-
-        # 打印错误详情
-        echo ""
-        echo -e "  ${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "  ${RED}[ERROR] ${name} 失败 (exit ${_exit}, ${elapsed_min} min)${NC}"
-        echo -e "  ${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${err_tail}" | while IFS= read -r line; do
-            echo -e "  ${RED}|${NC} ${line}"
-        done
-        echo -e "  ${YELLOW}完整日志: ${log_file}${NC}"
-        echo ""
+        echo -e "  ${YELLOW}日志: ${log_file}${NC}"
         return
     fi
 
-    if [ -z "${acc_proto}" ] && [ -z "${acc_model}" ] && [ -z "${acc_single}" ]; then
-        # Python 正常退出但没提取到准确率
-        local err_tail=$(tail -5 "${log_file}" 2>/dev/null)
-
-        printf "\r %-12s | ${YELLOW}%-10s${NC} | %-8s | %-14s | no acc output\n" \
-            "${name}" "WARN" "-" "${elapsed_min} min"
-
-        FAIL_NAMES+=("${name}")
-        FAIL_MSGS+=("no accuracy output — possible silent failure")
-        ((FAIL_COUNT++))
-
-        echo ""
-        echo -e "  ${YELLOW}[WARN] ${name} 运行完成但未输出准确率 (${elapsed_min} min)${NC}"
-        echo -e "  ${YELLOW}完整日志: ${log_file}${NC}"
-        echo ""
-        return
-    fi
-
-    # ── 成功 ──
-    local disp_acc="${acc_proto}"
-    local disp_note=""
+    local disp_acc="${acc_proto:-${acc_single}}"
     if [ -z "${disp_acc}" ]; then
-        disp_acc="${acc_single}"
-    fi
-    if [ -n "${acc_model}" ] && [ "${acc_model}" != "" ]; then
-        disp_note="w/o proto: ${acc_model}"
+        printf "\r %-16s | ${YELLOW}%-8s${NC} | %-8s | %-12s | no acc\n" "${name}" "WARN" "-" "${elapsed_min}min"
+        FAIL_NAMES+=("${name}"); FAIL_MSGS+=("no acc output")
+        ((FAIL_COUNT++))
+        return
     fi
 
-    printf "\r %-12s | ${GREEN}%-10s${NC} | %-8s | %-14s | %s\n" \
-        "${name}" "OK" "${disp_acc}" "${elapsed_min} min" "${disp_note}"
-
+    local note=""
+    [ -n "${auroc}" ] && note="auroc=${auroc}"
+    [ -n "${acc_model}" ] && note="${note} w/o=${acc_model}"
+    printf "\r %-16s | ${GREEN}%-8s${NC} | %-8s | %-12s | %s\n" "${name}" "OK" "${disp_acc}" "${elapsed_min}min" "${note}"
     ((PASS_COUNT++))
 }
 
 # ═══════════════════════════════════════════════════════════════════
 #  算法列表
 # ═══════════════════════════════════════════════════════════════════
-
 ALL_ALGOS=(
     "fedavg:${BASE_ARGS} --alg fedavg"
+    "fedprox:${BASE_ARGS} --alg fedprox --fedprox_mu 0.01"
     "fedproto:${BASE_ARGS} --alg fedproto"
     "fedgmkd:${BASE_ARGS} --alg fedgmkd --gmm_components 2"
     "fedbcs:${BASE_ARGS} --alg fedbcs"
     "fedseproto:${BASE_ARGS} --alg fedseproto --mi_lambda 0.05"
-    "d2fl:${BASE_ARGS} --alg d2fl --use_distributional --dist_type kl --use_disentangle --dis_lambda 0.05 --cal_lambda 0.01 --contra_lambda 0.05 --adv_lambda 0.01 --ent_lambda 0.001 --proto_momentum 0.9 --ld_warmup 3"
+    "fedcop:${BASE_ARGS} --alg fedcop ${FEDCOP_FLAGS}"
+    "fedcop_nocoo:${BASE_ARGS} --alg fedcop ${FEDCOP_FLAGS} --no_cooccurrence"
+    "fedcop_local:${BASE_ARGS} --alg fedcop ${FEDCOP_FLAGS} --local_cooc_only"
+    "fedcop_nolco:${BASE_ARGS} --alg fedcop ${FEDCOP_FLAGS} --no_lco"
 )
 
-# ═══════════════════════════════════════════════════════════════════
-#  执行
-# ═══════════════════════════════════════════════════════════════════
-
 TARGET="${1:-all}"
-
 print_header
 
 if [ "${TARGET}" != "all" ]; then
     for entry in "${ALL_ALGOS[@]}"; do
         ALGO_NAME="${entry%%:*}"
-        if [ "${ALGO_NAME}" = "${TARGET}" ]; then
-            run_algo "${ALGO_NAME}" "${entry#*:}"
-        fi
+        [ "${ALGO_NAME}" = "${TARGET}" ] && run_algo "${ALGO_NAME}" "${entry#*:}"
     done
 else
     for entry in "${ALL_ALGOS[@]}"; do
-        ALGO_NAME="${entry%%:*}"
-        run_algo "${ALGO_NAME}" "${entry#*:}"
+        run_algo "${entry%%:*}" "${entry#*:}"
     done
 fi
 
 # ═══════════════════════════════════════════════════════════════════
 #  汇总
 # ═══════════════════════════════════════════════════════════════════
-
-printf " %-12s-+-%-10s-+-%-8s-+-%-14s-|-%s\n" "------------" "----------" "--------" "--------------" "----------"
+printf " %-16s-+-%-8s-+-%-8s-+-%-12s-|-%s\n" "----------------" "--------" "--------" "------------" "----------"
 echo ""
 echo "=============================================="
-echo " 结果: ${GREEN}${PASS_COUNT} 通过${NC}  ${RED}${FAIL_COUNT} 失败${NC}  (共 $((PASS_COUNT + FAIL_COUNT)) 个算法)"
+echo " 结果: ${GREEN}${PASS_COUNT} 通过${NC}  ${RED}${FAIL_COUNT} 失败${NC}  (共 $((PASS_COUNT + FAIL_COUNT)) 个)"
 echo " 日志: ${LOG_DIR}"
 echo "=============================================="
 
