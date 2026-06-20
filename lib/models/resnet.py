@@ -179,7 +179,7 @@ class ResNet50(nn.Module):
 class FedCoPResNet(nn.Module):
     """FedCoP 专用模型:ImageNet 预训练 ResNet-50 + 概率原型头
 
-    设计刻意精简(砍掉了旧 D²-FL 的解耦头/对抗分类器/每类温度等冗余组件):
+    设计刻意精简(不含解耦头/对抗分类器/每类温度等冗余组件):
         [输入 224×224×3]
             │
             ▼

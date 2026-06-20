@@ -6,13 +6,13 @@
 #   2. get_dataset — 加载 ChestX-ray14 并按 Non-IID/IID 划分
 #   3. average_weights / average_weights_fedbn — 模型权重聚合
 #   4. agg_func — 单客户端本地原型聚合
-#   5. proto_aggregation — 跨客户端全局原型聚合（D²-FL 使用贝叶斯融合）
+#   5. proto_aggregation — 跨客户端全局原型聚合（FedCoP 使用贝叶斯融合）
 #   6. exp_details — 打印实验配置详情
 #
-# D²-FL 和 FedProto 的核心区别在这里体现：
+# FedCoP 和 FedProto 的核心区别在这里体现：
 #   proto_aggregation 根据 use_distributional 标志选择：
 #   - False: 算术平均（FedProto 方式，点原型取均值）
-#   - True:  贝叶斯精度加权融合（D²-FL 方式，方差小的原型权重更大）
+#   - True:  贝叶斯精度加权融合（FedCoP 方式，方差小的原型权重更大）
 # =============================================================================
 
 import copy
@@ -196,7 +196,7 @@ def average_weights_fedbn(w):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  原型聚合 — D²-FL 和 FedProto 的核心区别在此
+#  原型聚合 — FedCoP 和 FedProto 的核心区别在此
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def agg_func(protos, use_distributional=False):
@@ -262,7 +262,7 @@ def proto_aggregation(local_protos_list, use_distributional=False):
       → 算术平均。公平但忽略质量差异。
     - 分布原型（use_distributional=True）：
       → 贝叶斯精度加权融合。方差小的客户端（数据质量高/样本多）
-      在聚合中有更大的权重。这是 D²-FL 相比 FedProto 的关键优势。
+      在聚合中有更大的权重。这是 FedCoP 相比 FedProto 的关键优势。
 
     参数:
         local_protos_list:    {client_idx: {label: proto}} 各客户端上传的原型

@@ -1123,13 +1123,13 @@ def _proto_aggregation_FedGMKD(local_protos_list):
         if len(proto_list) == 1:
             global_protos[label] = proto_list[0]
         else:
-            device = all_m[0].device
             all_w, all_m, all_lv, qualities = [], [], [], []
             for entry in proto_list:
                 w, m, lv = entry
                 all_w.append(w); all_m.append(m); all_lv.append(lv)
                 q = 1.0 / (torch.exp(lv).mean() + 1e-8)  # 质量 = 1/平均方差
-                qualities.append(q.to(device))
+                qualities.append(q)
+            device = all_m[0].device
 
             q_t = torch.stack(qualities)
             q_sum = q_t.sum() + 1e-8

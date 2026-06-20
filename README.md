@@ -74,7 +74,6 @@ FedCoP/
 │       ├── losses.py              # KL / Wasserstein / MSE / Entropy reg
 │       ├── aggregation.py         # Bayesian precision-weighted fusion
 │       └── structured.py          # ★ Co-occurrence stat / fusion / L_co / mean-field decode
-├── figures/                       # Architecture diagrams
 ├── paper/                         # Paper & theory documentation
 ├── scripts/
 │   ├── run.sh                     # Full benchmark (3 seeds, mean±std)
@@ -188,7 +187,7 @@ $$\mathcal{L} = L_{CE} + \lambda_{\text{eff}}\,L_{proto} + \lambda_{co}\,L_{co} 
 
 The co-occurrence matrix `R̂` is estimated from label counts `(m_k, M_k, n_k)` (privacy-safe, no features), aggregated by count-weighted phi-correlation + shrinkage + EMA. At inference, a mean-field decoder uses `R̂` to propagate evidence across co-occurring classes.
 
-**Removed from prior D²-FL** (analyzed as redundant/dead): per-class temperature (dead code), adversarial domain loss (redundant), InfoNCE contrastive (overlaps L_proto+L_CE), calibration loss (collapsed logvar to scalar), and semantic-style disentanglement (orthogonal story line). See `paper/` for the full analysis and theory (decoder-regret bound + federated-estimation theorem).
+**Omitted regularizers** (analyzed as redundant/dead): per-class temperature (dead code), adversarial domain loss (redundant), InfoNCE contrastive (overlaps L_proto+L_CE), calibration loss (collapsed logvar to scalar), and semantic-style disentanglement (orthogonal story line). See `paper/` for the full analysis and theory (decoder-regret bound + federated-estimation theorem).
 
 ## Evaluation metrics
 
