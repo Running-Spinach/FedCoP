@@ -35,3 +35,6 @@ Thumbs.db
 # pytorch
 *.pth
 *.pt
+# stray fetched HTML from research tooling
+fh_ar5iv.html
+*.html
