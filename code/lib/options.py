@@ -89,11 +89,14 @@ def args_parser():
     parser.add_argument('--image_size', type=int, default=224,
                         help="输入图像尺寸。ResNet-50 标准输入为 224×224。")
     parser.add_argument('--dataset', type=str, default='chestxray14',
-                        help="数据集名称（当前仅支持 ChestX-ray14 多标签数据集）")
+                        choices=['chestxray14', 'mured'],
+                        help="数据集名称: chestxray14 (NIH 胸片, 14 类) / "
+                             "mured (MuReD 眼底多标签, 20 类)")
     parser.add_argument('--data_dir', type=str, default='./data/',
-                        help="数据集根目录（其下应有 chestxray/ 子目录）")
+                        help="数据集根目录（其下应有 chestxray/ 或 "
+                             "Multi-Label Retinal Diseases (MuReD) Dataset/ 子目录）")
     parser.add_argument('--num_classes', type=int, default=14,
-                        help="类别数量。ChestX-ray14 含 14 种常见胸腔疾病。")
+                        help="类别数量。chestxray14=14, mured=20。须与所选数据集匹配。")
 
     # ═══════════════════════════════════════════════════════════════════════════
     #  4. 硬件与训练配置

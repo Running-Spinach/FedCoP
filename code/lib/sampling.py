@@ -57,15 +57,26 @@ def chestxray_noniid(args, dataset, num_users, n_list, k_list):
                     chosen = available
                 user_data.extend(chosen.tolist())
 
-        # "No Finding" 样本均匀分配给所有客户端
+        # "No Finding" 样本按阴阳比例分配给所有客户端(而非 // num_users 均分)
+        # nf_per_client = len(nf) * (本客户端疾病图数 / 全集疾病图数)
+        # → 每客户端阴阳比 ≈ 全局阴阳比,且随 ways×shots 自然缩放,
+        #   避免 few-shot 设定下被均分塞进几千张 No Finding。
+        num_disease = len(user_data)                          # 本客户端实际拿到的疾病图数
         if -1 in label_ranges:
             start, end = label_ranges[-1]
             nf_samples = sorted_idxs[start:end]
-            nf_per_client = max(10, len(nf_samples) // num_users)
+            total_disease = num_imgs - len(nf_samples)        # 全集疾病图数(≥1 阳性)
+            if total_disease > 0:
+                nf_per_client = int(round(len(nf_samples) * num_disease / total_disease))
+            else:
+                nf_per_client = 10
+            nf_per_client = max(1, min(nf_per_client, len(nf_samples)))
             nf_chosen = np.random.choice(nf_samples, nf_per_client, replace=False)
             user_data.extend(nf_chosen.tolist())
 
         dict_users[i] = np.array(list(set(user_data)))#去重打乱
+        nf_count = len(dict_users[i]) - num_disease if -1 in label_ranges else 0
+        print(f"   → 疾病图 {num_disease} 张 + No Finding {nf_count} 张 = {len(dict_users[i])} 张")
         classes_list.append(classes)
 
     return dict_users, classes_list

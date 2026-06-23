@@ -27,6 +27,7 @@ if str(lib_dir) not in sys.path:
     sys.path.insert(0, str(lib_dir))
 from dist_proto.aggregation import bayesian_fusion_single_label
 from chestxray import ChestXray14
+from mured import MuReD
 
 
 class TransformedSubset:
@@ -94,42 +95,53 @@ def get_dataset(args, n_list, k_list):
         classes_list:    每个客户端拥有的类别列表
         classes_list_gt: 用于测试的客户端类别列表
     """
-    if args.dataset != 'chestxray14':
-        raise ValueError(f"Unsupported dataset: {args.dataset}. Only 'chestxray14' is supported.")
-
-    data_dir = args.data_dir + 'chestxray'
     image_size = getattr(args, 'image_size', 224)
 
-    # ── 训练数据增强 + 标准化 ──
-    # 使用 ImageNet 标准均值和标准差（配合预训练 ResNet-50）
-    train_transform = transforms.Compose([
-        transforms.Grayscale(3),  # 灰度图复制为 3 通道（模拟 RGB），使 ResNet 可处理
-        transforms.Resize((image_size, image_size)),  # 统一尺寸
-        transforms.RandomHorizontalFlip(),  # 随机水平翻转（数据增强）
-        transforms.ToTensor(),  # [0, 255] → [0, 1]
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],  # ImageNet 标准归一化
-                             std=[0.229, 0.224, 0.225]),
-    ])
-
-    # ── 测试 transform（无数据增强）──
-    test_transform = transforms.Compose([
-        transforms.Grayscale(3),
-        transforms.Resize((image_size, image_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225]),
-    ])
-
-    # 加载完整数据集（无 transform，由 TransformedSubset 按需应用）
-    full_dataset = ChestXray14(data_dir, transform=None, image_size=image_size)
-    n_total = len(full_dataset)
-    # 80/20 训练/测试划分（固定 seed 保证可复现）
-    n_train = int(0.8 * n_total)
-    idxs = np.random.RandomState(args.seed).permutation(n_total)
-    train_idxs, test_idxs = idxs[:n_train], idxs[n_train:]
-
-    train_dataset = TransformedSubset(full_dataset, train_idxs, train_transform)
-    test_dataset = TransformedSubset(full_dataset, test_idxs, test_transform)
+    if args.dataset == 'chestxray14':
+        # ── ChestX-ray14：灰度胸片，80/20 自划分 ──
+        data_dir = args.data_dir + 'chestxray'
+        train_transform = transforms.Compose([
+            transforms.Grayscale(3),  # 灰度图复制为 3 通道（模拟 RGB）
+            transforms.Resize((image_size, image_size)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ])
+        test_transform = transforms.Compose([
+            transforms.Grayscale(3),
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ])
+        full_dataset = ChestXray14(data_dir, transform=None, image_size=image_size)
+        n_total = len(full_dataset)
+        n_train = int(0.8 * n_total)
+        idxs = np.random.RandomState(args.seed).permutation(n_total)
+        train_idxs, test_idxs = idxs[:n_train], idxs[n_train:]
+        train_dataset = TransformedSubset(full_dataset, train_idxs, train_transform)
+        test_dataset = TransformedSubset(full_dataset, test_idxs, test_transform)
+    elif args.dataset == 'mured':
+        # ── MuReD：彩色眼底图，使用预划分 train_data.csv / val_data.csv ──
+        data_dir = args.data_dir + 'Multi-Label Retinal Diseases (MuReD) Dataset'
+        train_transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ])
+        test_transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ])
+        train_dataset = MuReD(data_dir, split='train', transform=train_transform, image_size=image_size)
+        test_dataset = MuReD(data_dir, split='val', transform=test_transform, image_size=image_size)
+    else:
+        raise ValueError(f"Unsupported dataset: {args.dataset}. Supported: 'chestxray14', 'mured'.")
 
     # ── 按 IID/Non-IID 分配客户端数据 ──
     if args.iid:

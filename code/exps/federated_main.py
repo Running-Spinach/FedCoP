@@ -103,6 +103,13 @@ def FedProto_taskheter(args, train_dataset, test_dataset, user_groups,
         np.mean(acc_list_g), np.std(acc_list_g)))
     print('For all users (w/o protos), mean of per-label acc is {:.5f}, std is {:.5f}'.format(
         np.mean(acc_list_l), np.std(acc_list_l)))
+    # 保存全局原型供 t-SNE 可视化对比
+    try:
+        from visualize import save_protos_npy
+        save_protos_npy(global_protos, args.alg, args.num_classes,
+                        proto_dir=getattr(args, 'proto_dir', None) or './protos_vis')
+    except Exception as _e:
+        print(f"[vis] skip save protos for {args.alg}: {_e}")
     return acc_list_l, acc_list_g
 
 
@@ -249,6 +256,13 @@ def FedCoP_taskheter(args, train_dataset, test_dataset, user_groups,
         np.mean(acc_list_l), np.std(acc_list_l)))
     print('For all users (with protos), mean of proto loss is {:.5f}, std is {:.5f}'.format(
         np.mean(loss_list), np.std(loss_list)))
+    # 保存全局原型供 t-SNE 可视化对比
+    try:
+        from visualize import save_protos_npy
+        save_protos_npy(global_protos, args.alg, args.num_classes,
+                        proto_dir=getattr(args, 'proto_dir', None) or './protos_vis')
+    except Exception as _e:
+        print(f"[vis] skip save protos for {args.alg}: {_e}")
 
     return acc_list_l, acc_list_g
 
@@ -288,6 +302,15 @@ def FedAvg_taskheter(args, train_dataset, test_dataset, user_groups,
         train_loss.append(sum(local_losses) / len(local_losses))
 
     acc_list = eval_clients_multilabel(args, local_model_list, test_dataset, user_groups_lt)
+    # 保存全局原型供 t-SNE 可视化对比(FedAvg/FedProx 无全局原型,自动跳过)
+    try:
+        from visualize import save_protos_npy
+        save_protos_npy(global_protos, args.alg, args.num_classes,
+                        proto_dir=getattr(args, 'proto_dir', None) or './protos_vis')
+    except NameError:
+        pass  # 该算法无 global_protos(如 FedAvg/FedProx),跳过
+    except Exception as _e:
+        print(f"[vis] skip save protos for {args.alg}: {_e}")
     print('For all users, mean of per-label acc is {:.5f}, std is {:.5f}'.format(
         np.mean(acc_list), np.std(acc_list)))
     return acc_list
@@ -328,6 +351,15 @@ def FedProx_taskheter(args, train_dataset, test_dataset, user_groups,
         train_loss.append(sum(local_losses) / len(local_losses))
 
     acc_list = eval_clients_multilabel(args, local_model_list, test_dataset, user_groups_lt)
+    # 保存全局原型供 t-SNE 可视化对比(FedAvg/FedProx 无全局原型,自动跳过)
+    try:
+        from visualize import save_protos_npy
+        save_protos_npy(global_protos, args.alg, args.num_classes,
+                        proto_dir=getattr(args, 'proto_dir', None) or './protos_vis')
+    except NameError:
+        pass  # 该算法无 global_protos(如 FedAvg/FedProx),跳过
+    except Exception as _e:
+        print(f"[vis] skip save protos for {args.alg}: {_e}")
     print('For all users, mean of per-label acc is {:.5f}, std is {:.5f}'.format(
         np.mean(acc_list), np.std(acc_list)))
     return acc_list
@@ -375,6 +407,15 @@ def FedGMKD_taskheter(args, train_dataset, test_dataset, user_groups,
         train_loss.append(sum(local_losses) / len(local_losses))
 
     acc_list = eval_clients_multilabel(args, local_model_list, test_dataset, user_groups_lt)
+    # 保存全局原型供 t-SNE 可视化对比(FedAvg/FedProx 无全局原型,自动跳过)
+    try:
+        from visualize import save_protos_npy
+        save_protos_npy(global_protos, args.alg, args.num_classes,
+                        proto_dir=getattr(args, 'proto_dir', None) or './protos_vis')
+    except NameError:
+        pass  # 该算法无 global_protos(如 FedAvg/FedProx),跳过
+    except Exception as _e:
+        print(f"[vis] skip save protos for {args.alg}: {_e}")
     print('For all users, mean of per-label acc is {:.5f}, std is {:.5f}'.format(
         np.mean(acc_list), np.std(acc_list)))
     return acc_list
@@ -421,6 +462,15 @@ def FedBCS_taskheter(args, train_dataset, test_dataset, user_groups,
         train_loss.append(sum(local_losses) / len(local_losses))
 
     acc_list = eval_clients_multilabel(args, local_model_list, test_dataset, user_groups_lt)
+    # 保存全局原型供 t-SNE 可视化对比(FedAvg/FedProx 无全局原型,自动跳过)
+    try:
+        from visualize import save_protos_npy
+        save_protos_npy(global_protos, args.alg, args.num_classes,
+                        proto_dir=getattr(args, 'proto_dir', None) or './protos_vis')
+    except NameError:
+        pass  # 该算法无 global_protos(如 FedAvg/FedProx),跳过
+    except Exception as _e:
+        print(f"[vis] skip save protos for {args.alg}: {_e}")
     print('For all users, mean of per-label acc is {:.5f}, std is {:.5f}'.format(
         np.mean(acc_list), np.std(acc_list)))
     return acc_list
@@ -465,6 +515,15 @@ def FedSeProto_taskheter(args, train_dataset, test_dataset, user_groups,
         train_loss.append(sum(local_losses) / len(local_losses))
 
     acc_list = eval_clients_multilabel(args, local_model_list, test_dataset, user_groups_lt)
+    # 保存全局原型供 t-SNE 可视化对比(FedAvg/FedProx 无全局原型,自动跳过)
+    try:
+        from visualize import save_protos_npy
+        save_protos_npy(global_protos, args.alg, args.num_classes,
+                        proto_dir=getattr(args, 'proto_dir', None) or './protos_vis')
+    except NameError:
+        pass  # 该算法无 global_protos(如 FedAvg/FedProx),跳过
+    except Exception as _e:
+        print(f"[vis] skip save protos for {args.alg}: {_e}")
     print('For all users, mean of per-label acc is {:.5f}, std is {:.5f}'.format(
         np.mean(acc_list), np.std(acc_list)))
     return acc_list

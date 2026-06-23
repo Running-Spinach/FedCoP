@@ -3,14 +3,19 @@
 # FedCoP 全算法对比运行脚本 — 带详细汇总表(多 seed 平均)
 # =============================================================================
 # 用法:
-#   bash ./scripts/run.sh                # 运行所有算法 × 所有 seed
-#   bash ./scripts/run.sh fedcop         # 仅运行指定算法(所有 seed)
-#   bash ./scripts/run.sh --dry-run      # 仅打印命令,不实际执行
+#   bash code/scripts/run.sh                # 运行所有算法 × 所有 seed
+#   bash code/scripts/run.sh fedcop         # 仅运行指定算法(所有 seed)
+#   bash code/scripts/run.sh --dry-run      # 仅打印命令,不实际执行
 #
 # 环境假设:Linux 服务器 + NVIDIA GPU(如 4090)。直接用 python 调用。
 # 多 seed:CCF-A 要求多次重复,默认 3 个 seed,结果取 mean±std。
 # =============================================================================
 set -e
+
+# 切到项目根,使所有相对路径(./data, ./logs, ./protos_vis, code/exps)统一
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$PROJECT_ROOT"
 
 DRY_RUN=false
 if [ "${1}" = "--dry-run" ]; then
@@ -37,7 +42,16 @@ FRAC=0.5
 PROTO_DIM=128
 SEEDS=(1234 2024 42)                       # 3 seed,CCF-A 标准
 
-BASE_ARGS="--num_classes 14 --num_users ${NUM_USERS} --ways ${WAYS} --shots ${SHOTS} \
+# ── 数据集选择(环境变量,默认 chestxray14)──
+# 用法: DATASET=mured bash code/scripts/run.sh fedcop
+DATASET=${DATASET:-chestxray14}
+case ${DATASET} in
+    chestxray14) NUM_CLASSES=14 ;;
+    mured)       NUM_CLASSES=20 ;;
+    *) echo "未知 DATASET=${DATASET}(支持: chestxray14 / mured)"; exit 1 ;;
+esac
+
+BASE_ARGS="--dataset ${DATASET} --num_classes ${NUM_CLASSES} --num_users ${NUM_USERS} --ways ${WAYS} --shots ${SHOTS} \
 --stdev ${STDEV} --rounds ${ROUNDS} --frac ${FRAC} --ld ${LD} --proto_dim ${PROTO_DIM} \
 --local_bs 16 --train_ep 5"
 
@@ -69,7 +83,7 @@ run_one() {
 
     SECONDS=0
     local _exit=0
-    python exps/federated_main.py ${args} --seed ${seed} > "${log_file}" 2>&1 || _exit=$?
+    python code/exps/federated_main.py ${args} --seed ${seed} > "${log_file}" 2>&1 || _exit=$?
     local elapsed_min=$(awk "BEGIN {printf \"%.1f\", ${SECONDS} / 60}")
 
     # ── 提取指标 ──
@@ -123,8 +137,8 @@ ALGO_ORDER=(fedavg fedprox fedproto fedgmkd fedbcs fedseproto fedcop fedcop_noco
 TARGET="${1:-all}"
 
 printf "\n===========================================================\n"
-printf " %sFedCoP Benchmark%s  rounds=%d users=%d ways=%d shots=%d proto_dim=%d seeds={%s}\n" \
-    "${BOLD}" "${NC}" ${ROUNDS} ${NUM_USERS} ${WAYS} ${SHOTS} ${PROTO_DIM} "${SEEDS[*]}"
+printf " %sFedCoP Benchmark%s  rounds=%d users=%d ways=%d shots=%d proto_dim=%d seeds={%s} dataset=%s(%d类)\n" \
+    "${BOLD}" "${NC}" ${ROUNDS} ${NUM_USERS} ${WAYS} ${SHOTS} ${PROTO_DIM} "${SEEDS[*]}" "${DATASET}" ${NUM_CLASSES}
 printf " 开始: %s\n" "${START_TS}"
 printf "===========================================================\n"
 

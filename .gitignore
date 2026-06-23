@@ -38,3 +38,10 @@ Thumbs.db
 # stray fetched HTML from research tooling
 fh_ar5iv.html
 *.html
+
+# Logs & visualization artifacts
+logs/
+protos_vis/
+
+# Claude Code local tooling
+.claude/
