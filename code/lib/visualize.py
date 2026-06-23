@@ -22,7 +22,8 @@ import random
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from sklearn.manifold import TSNE
+# sklearn 的 TSNE 改为 lazy import(_tsne_2d 内),避免 save_protos_npy
+# 这类只存 .npy 的流程在未装 sklearn 时也报 ImportError。
 
 # 20 种颜色(覆盖 ChestX-ray14 的 14 类与 MuReD 的 20 类)
 COLORS = ['#000000', 'peru', '#FF8C00', 'gold', 'lightseagreen', 'royalblue',
@@ -89,6 +90,7 @@ def save_protos_npy(global_protos, alg, num_classes, proto_dir='./protos_vis'):
 
 def _tsne_2d(x, seed=1234):
     """t-SNE 降到 2 维。原型点数少(C=14/20),perplexity 自适应。"""
+    from sklearn.manifold import TSNE  # lazy import: 仅画 t-SNE 图时需要
     x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
     n = x.shape[0]
     perp = max(2.0, min(5.0, n - 1.0))
