@@ -102,7 +102,7 @@ run_algo() {
         printf "\r %-16s | ${RED}%-8s${NC} | %-8s | %-12s | ${RED}%s${NC}\n" \
             "${name}" "FAIL" "-" "${elapsed_min}min" "${err_line:0:40}"
         FAIL_NAMES+=("${name}"); FAIL_MSGS+=("${err_line}")
-        ((FAIL_COUNT++))
+        FAIL_COUNT=$((FAIL_COUNT + 1))
         echo -e "  ${YELLOW}日志: ${log_file}${NC}"
         return
     fi
@@ -111,7 +111,7 @@ run_algo() {
     if [ -z "${disp_acc}" ]; then
         printf "\r %-16s | ${YELLOW}%-8s${NC} | %-8s | %-12s | no acc\n" "${name}" "WARN" "-" "${elapsed_min}min"
         FAIL_NAMES+=("${name}"); FAIL_MSGS+=("no acc output")
-        ((FAIL_COUNT++))
+        FAIL_COUNT=$((FAIL_COUNT + 1))
         return
     fi
 
@@ -119,7 +119,7 @@ run_algo() {
     [ -n "${auroc}" ] && note="auroc=${auroc}"
     [ -n "${acc_model}" ] && note="${note} w/o=${acc_model}"
     printf "\r %-16s | ${GREEN}%-8s${NC} | %-8s | %-12s | %s\n" "${name}" "OK" "${disp_acc}" "${elapsed_min}min" "${note}"
-    ((PASS_COUNT++))
+    PASS_COUNT=$((PASS_COUNT + 1))
 }
 
 # ═══════════════════════════════════════════════════════════════════
