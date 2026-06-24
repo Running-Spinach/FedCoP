@@ -166,6 +166,10 @@ def args_parser():
                         help='[FedCoP] 共现结构对齐损失 L_co 的权重 λ_co。'
                              '把各类原型余弦 Gram 对齐到联邦共现相关矩阵 R̂。'
                              '设为 0 等价于关闭训练侧结构(--no_lco)。')
+    parser.add_argument('--co_warmup', type=int, default=10,
+                        help='[FedCoP] L_co 的 warmup 轮数。前 N 轮 R̂ 还是噪声,'
+                             '不下发 R̂(L_co 退化为 0),等 R̂ 稳定后再开。'
+                             '0=从第一轮就开(旧行为)。修复"完整版反不如 nocoo"的倒挂。')
     parser.add_argument('--cov_shrinkage', type=float, default=0.1,
                         help='[FedCoP] 共现相关矩阵收缩系数 η ∈ [0,1]。'
                              'R̂=(1−η)R+ηI,拉向单位阵保证正定+小样本稳定。'
@@ -207,6 +211,10 @@ def args_parser():
     parser.add_argument('--temperature', type=float, default=1.0,
                         help='原型推理温度 T。logit = -dist / T。'
                              'T<1 锐化(更敏感),T>1 软化(更平滑)。')
+    parser.add_argument('--fuse_alpha', type=float, default=0.5,
+                        help='[FedCoP] 推理时分类器 logit 与原型 logit 的融合权重 α。'
+                             'fused = α·logit_cls + (1−α)·logit_proto,再进 mean-field。'
+                             'α=1 纯分类器,α=0 纯原型,0.5 等权(默认)。')
 
     # ═══════════════════════════════════════════════════════════════════════════
     #  11. 基线算法专属参数

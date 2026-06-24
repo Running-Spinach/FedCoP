@@ -144,6 +144,7 @@ def FedCoP_taskheter(args, train_dataset, test_dataset, user_groups,
     co_rank = getattr(args, 'co_rank', 0)
     no_cooc = getattr(args, 'no_cooccurrence', False)
     local_only = getattr(args, 'local_cooc_only', False)
+    co_warmup = getattr(args, 'co_warmup', 0)
 
     global_protos = []                           # 全局分布原型 {label:(mu,logvar)}
     global_R = None                              # 全局共现相关矩阵 R̂
@@ -173,8 +174,10 @@ def FedCoP_taskheter(args, train_dataset, test_dataset, user_groups,
         # 自适应原型损失权重 warmup
         ld = args.ld * min(1.0, (round + 1) / max(ld_warmup, 1))
 
-        # 训练用的 R̂:首轮或 no_cooc 消融时为 None(L_co 退化)
-        R_for_train = global_R if (global_R is not None and not no_cooc) else None
+        # 训练用的 R̂:首轮 / no_cooc 消融 / warmup 未到 时为 None(L_co 退化)
+        # warmup:前 co_warmup 轮 R̂ 还是噪声,不下发,等稳定后再开 L_co
+        co_ready = (global_R is not None and not no_cooc and round >= co_warmup)
+        R_for_train = global_R if co_ready else None
 
         for idx in idxs_users:
             local_model = LocalUpdate(args=args, dataset=train_dataset,
@@ -550,6 +553,13 @@ if __name__ == '__main__':
         torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
+
+    # ── GPU 确认(一眼看出是否在用 GPU,避免 CPU 上慢跑)──
+    if args.device == 'cuda':
+        print(f'[GPU] CUDA OK | device={torch.cuda.get_device_name(torch.cuda.current_device())} '
+              f'| idx={int(args.gpu)} | PyTorch={torch.__version__}')
+    else:
+        print('[GPU] WARNING: CUDA 不可用,将在 CPU 上运行(速度会慢几十倍,建议用 GPU 跑)')
 
     # ── Non-IID 数据划分参数 ──
     # n_list:每个客户端拥有的类别数;k_list:每类样本数

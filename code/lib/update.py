@@ -796,15 +796,16 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
 def test_inference_FedCoP(args, local_model_list, test_dataset, classes_list,
                           user_groups_gt, global_protos=[], global_R=None,
                           global_pi=None, local_R_dict=None, temperature=None):
-    """FedCoP 测试推理:模型分类器 + 相关性感知原型解码 + 完整多标签指标
+    """FedCoP 测试推理:分类器 + 原型融合 + 相关性感知解码 + 完整多标签指标
 
-    两条评估路径:
-      1. 模型自身分类器:sigmoid(logits) > 0.5
-      2. 全局原型 + mean-field 结构化解码:
-           - 每类用对角马氏距离到全局原型 → 独立 logit s_c
-           - 用共现相关矩阵 R̂ 做 mean-field 迭代,在共现类间传播证据
+    两条评估路径(同一前向,共享特征):
+      1. w/o protos:纯分类器 sigmoid(logits) > 0.5
+      2. w/ protos :分类器 logit 与原型马氏 logit 融合 → mean-field 解码
+           - 每类用对角马氏距离到全局原型 → 独立原型 logit s_c(÷ temperature)
+           - fused = α·logit_cls + (1−α)·s_proto(α=args.fuse_alpha)
+           - 用共现相关矩阵 R̂ 对 fused 做 mean-field 迭代,在共现类间传播证据
            - R̂=I 或 --no_cooccurrence 时退化为独立 sigmoid(消融基线)
-    并在原型解码概率上计算 AUROC/F1/Hamming/subset 等完整指标。
+    并在融合解码概率上计算 AUROC/F1/Hamming/subset 等完整指标。
 
     参数:
         args:           全局配置
@@ -833,6 +834,7 @@ def test_inference_FedCoP(args, local_model_list, test_dataset, classes_list,
     local_only = getattr(args, 'local_cooc_only', False)
     beta = getattr(args, 'co_beta', 1.0)
     mf_steps = getattr(args, 'co_mf_steps', 2)
+    fuse_alpha = getattr(args, 'fuse_alpha', 0.5)   # 分类器 logit 与原型 logit 融合权重
 
     C = args.num_classes
     eye = torch.eye(C, device=device)
@@ -860,22 +862,14 @@ def test_inference_FedCoP(args, local_model_list, test_dataset, classes_list,
         else:
             R_use, pi_use = R_glb, pi_glb
 
-        # ════════ 方式1:模型自身分类器 ════════
+        # ════════ 单次前向,同时取分类器 logits 与原型特征 ════════
+        # 方式1(w/o protos):纯分类器 sigmoid(logits)
+        # 方式2(w/ protos) :分类器 logit + 原型马氏 logit 融合 → mean-field 解码
         model.eval()
-        total_val, correct_val = 0.0, 0.0
-        for images, labels in testloader:
-            images, labels = images.to(device), labels.to(device)
-            output = model(images)
-            logits = output[0]
-            preds = (torch.sigmoid(logits) > 0.5).float()
-            correct_val += (preds == labels).float().sum().item()
-            total_val += labels.numel()
-        acc_list_l.append(correct_val / max(total_val, 1))
-
-        # ════════ 方式2:全局原型 + mean-field 结构化解码 ════════
-        model.eval()
-        total_val, correct_val = 0.0, 0.0
+        total_l, total_g = 0.0, 0.0
+        correct_l, correct_g = 0.0, 0.0
         diag_loss = 0.0
+        _diag_printed = False
         for images, labels in testloader:
             images, labels = images.to(device), labels.to(device)
             output = model(images)
@@ -883,7 +877,7 @@ def test_inference_FedCoP(args, local_model_list, test_dataset, classes_list,
             proto_feats = mu                       # 用分布均值作为查询特征
             B = images.shape[0]
 
-            # 逐样本逐类:对角马氏距离 → 独立 logit s_c
+            # 逐样本逐类:对角马氏距离 → 独立原型 logit s_c
             s = torch.zeros(B, C, device=device)
             for j in range(C):
                 if j in global_protos:
@@ -892,24 +886,46 @@ def test_inference_FedCoP(args, local_model_list, test_dataset, classes_list,
                     # e_j = 0.5 * Σ_d (x_d − μ_jd)² / σ²_jd  (B,)
                     e_j = 0.5 * (((proto_feats - g_mu) ** 2) / g_var).sum(dim=1)
                     s[:, j] = -e_j / temperature
-                    # 诊断:平均马氏距离
                     diag_loss += e_j.mean().item()
+                else:
+                    # 该类无全局原型(首尾轮/未见类),回退用分类器 logit
+                    s[:, j] = logits[:, j]
+
+            # 首客户端首批:打印 s 量级,诊断 temperature 是否使原型 logit 饱和
+            if not _diag_printed and idx == 0:
+                with torch.no_grad():
+                    _sig_s = torch.sigmoid(s).mean().item()
+                    _sig_l = torch.sigmoid(logits).mean().item()
+                print(f'  [decode-diag] mean σ(s_proto)={_sig_s:.4f} '
+                      f'mean σ(logit_cls)={_sig_l:.4f} '
+                      f'(若 σ(s)≈0或1 → 原型 logit 饱和,需调大 temperature)')
+                _diag_printed = True
+
+            # ★ 融合:fused = α·logit_cls + (1−α)·s_proto
+            fused = fuse_alpha * logits + (1.0 - fuse_alpha) * s
 
             # 相关性感知 mean-field 解码(R̂=I 时退化为独立 sigmoid)
-            q = mean_field_decode(s, R_use, pi_use, beta=beta, steps=mf_steps)
+            q = mean_field_decode(fused, R_use, pi_use, beta=beta, steps=mf_steps)
 
-            preds = (q > 0.5).float()
-            correct_val += (preds == labels).float().sum().item()
-            total_val += labels.numel()
+            # 方式1:纯分类器
+            preds_l = (torch.sigmoid(logits) > 0.5).float()
+            correct_l += (preds_l == labels).float().sum().item()
+            total_l += labels.numel()
+
+            # 方式2:融合 + mean-field
+            preds_g = (q > 0.5).float()
+            correct_g += (preds_g == labels).float().sum().item()
+            total_g += labels.numel()
 
             all_probs_g.append(q.detach().cpu())
             all_labels_g.append(labels.detach().cpu())
 
-        acc_list_g.append(correct_val / max(total_val, 1))
+        acc_list_l.append(correct_l / max(total_l, 1))
+        acc_list_g.append(correct_g / max(total_g, 1))
         loss_list.append(diag_loss / max(len(testloader), 1))
 
         print('| User: {} | Test Acc w/o protos (per-label): {:.4f} | '
-              'w/ protos(structured): {:.4f}'.format(
+              'w/ protos(fused+structured): {:.4f}'.format(
                   idx, acc_list_l[-1], acc_list_g[-1]))
 
     # ── 原型解码路径的完整多标签指标 ──

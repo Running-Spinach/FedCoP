@@ -40,7 +40,7 @@ STDEV=2
 LD=1.0
 FRAC=0.5
 PROTO_DIM=128
-SEEDS=(1234 2024 42)                       # 3 seed,CCF-A 标准
+SEEDS=(1234)                               # 单 seed(调参阶段;定稿后再加多 seed)
 
 # ── 数据集选择(环境变量,默认 chestxray14)──
 # 用法: DATASET=mured bash code/scripts/run.sh fedcop
@@ -57,7 +57,8 @@ BASE_ARGS="--dataset ${DATASET} --num_classes ${NUM_CLASSES} --num_users ${NUM_U
 
 # FedCoP 专属默认 flag(完整方法)
 FEDCOP_FLAGS="--co_lambda 0.1 --cov_shrinkage 0.1 --co_beta 1.0 --co_mf_steps 2 \
---ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 --ld_warmup 20"
+--ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 --ld_warmup 20 \
+--co_warmup 10 --fuse_alpha 0.5"
 
 LOG_DIR="./logs/benchmark_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "${LOG_DIR}"

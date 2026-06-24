@@ -60,7 +60,8 @@ make_base_args() {
 }
 
 FEDCOP_FLAGS="--co_lambda 0.1 --cov_shrinkage 0.1 --co_beta 1.0 --co_mf_steps 2 \
---ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 --ld_warmup 3"
+--ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 --ld_warmup 3 \
+--co_warmup 0 --fuse_alpha 0.5"
 
 LOG_ROOT="./logs/test_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "${LOG_ROOT}"

@@ -387,6 +387,7 @@ The experiments have two jobs. The first is to place FedCoP against the methods 
 - **Dataset.** NIH ChestX-ray14, 14 thoracic pathologies, multi-label. 80/20 train/test split; non-IID class partitioning with $\text{ways}{=}3$, $\text{shots}{=}50$, $\text{stdev}{=}2$, $K{=}10$ clients, $30$ communication rounds, participation fraction $0.5$. The non-IID split is the whole point, and it realizes all four heterogeneity axes of §1.2: $\text{ways}{=}3$ gives class-support heterogeneity (each client sees only 3 of 14 classes, the regime in which no single client can recover the co-occurrence structure, Prop. 2c); the resulting per-client case mix gives marginal-prevalence heterogeneity (a client's local $p_c$ is a biased view of $\pi_c$); the limited pairwise coverage gives co-occurrence-structure heterogeneity (most off-diagonal entries of $\mathbf{M}_k$ are exact zeros); and $\text{stdev}{=}2$ together with participation fraction $0.5$ gives data-volume and participation heterogeneity (unequal $n_k$, unequal participation rates, the setting Prop. 2a's reweighting addresses). This is the regime in which FedCoP's federated estimate is supposed to matter most. ChestX-ray14 is dominated by "No Finding" images; rather than splitting this majority class evenly across clients (which would flood each client with thousands of negatives regardless of $\text{shots}$), we allocate No-Finding to each client in proportion to its positive-image count, $n_{\text{NF}}^{(k)} \approx |\text{NF}| \cdot n_{\text{pos}}^{(k)} / |\text{pos}|$, so the per-client negative:positive ratio tracks the global one and the client data volume scales with $\text{ways}\times\text{shots}$ as intended.
 - **Second dataset (cross-modality generalization).** MuReD (Multi-label Retinal Diseases), 20 retinal pathologies, multi-label fundus images, using its standard 1764/444 train/val split under the same non-IID protocol ($\text{ways}{=}3$, $K{=}10$, etc.). MuReD is a deliberately harder test for FedCoP: its labels are less co-occurring (≈22% of train images are multi-label, vs. denser comorbidity on ChestX-ray14) and long-tailed (DR/NORMAL ≈396 down to CRS ≈24). By Prop. 1 the achievable gain shrinks with co-occurrence strength, so a smaller-but-consistent gain on MuReD is the theory-predicted outcome, not a failure. We report each dataset's mean $|\text{off-diag }\hat R|$ to make the co-occurrence-strength gap explicit and to show the gain tracks it monotonically.
 - **Backbone.** ImageNet-pretrained ResNet-50, $D{=}128$ prototype dim, shared across all methods for fairness.
+- **FedCoP inference & training details.** Two implementation choices, held fixed across all FedCoP ablation rows so that the ablation isolates $\hat R$/$L_{co}$/decoder and not these. (a) **Logit fusion at the decoder.** The independent logit fed to the mean-field decoder is a convex combination of the BCE-trained classifier logit and the prototype Mahalanobis logit, $s_c = \alpha\,\mathrm{logit}_c^{\mathrm{cls}} + (1-\alpha)(-e_c/T)$, with $\alpha{=}0.5$, $T{=}1.0$. This keeps the calibrated classifier in the loop and prevents the prototype path—which is ill-conditioned early in training and for rarely-seen classes—from dominating the decoded probabilities; for classes with no global prototype yet, the prototype term falls back to the classifier logit. The mean-field coupling $\hat R$ then acts on this fused logit, so Prop. 1's guarantee (mean-field $\not\prec$ independent sigmoid) continues to apply. (b) **$L_{co}$ warmup.** $\hat R$ is aggregated and EMA-smoothed from round 1, but is not fed to $L_{co}$ until round $W{=}10$, by which point the federated estimate has stabilized. Using the noisy early $\hat R$ to align prototype geometry was observed to invert the ablation ordering (full $<$ `--no_cooccurrence` without warmup); the warmup removes this inversion, restoring the expected full $>$ `--no_cooccurrence`.
 - **Baselines.** FedAvg, FedProx, FedProto, FedGMKD, FedBCS, FedSeProto, the weight-sharing, proximal, and prototype-sharing families. We re-implement the prototype baselines under the same backbone and split for a controlled comparison; where our re-implementation is a simplification of the original (e.g. FedBCS uses a 1D InstanceNorm recalibration in place of the original frequency-domain separation), we say so explicitly rather than silently inheriting an advantage.
 - **Metrics.** Macro/micro AUROC, macro/micro F1, Hamming loss, subset accuracy, per-class AUROC. We deliberately lead with macro metrics: ChestX-ray14 is label-imbalanced (atelectasis is common, hernia is rare), and a flattened per-label accuracy is dominated by the easy negatives of frequent classes; it can move the wrong way while real diagnostic performance improves. Macro-AUROC weights the rare classes that clinical care about.
 - **Repeats.** 3 seeds; we report mean±std.
@@ -396,6 +397,7 @@ The experiments have two jobs. The first is to place FedCoP against the methods 
 - **数据集。** NIH ChestX-ray14,14 种胸科病理,多标签。80/20 训练/测试划分;非独立同分布类别划分,$\text{ways}{=}3$、$\text{shots}{=}50$、$\text{stdev}{=}2$、$K{=}10$ 个客户端、$30$ 轮通信、参与比例 $0.5$。non-IID 划分正是全部意义所在,它同时实现了 §1.2 的四个异质维度:$\text{ways}{=}3$ 带来类别支持异质(每个客户端只见 14 类中的 3 类,即任何单客户端都无法恢复共现结构的体制,命题 2c);由此产生的各客户端病例构成带来边际患病率异质(本地 $p_c$ 是对 $\pi_c$ 的有偏观察);有限的两两覆盖带来共现结构异质($\mathbf{M}_k$ 的多数非对角元为精确零);而 $\text{stdev}{=}2$ 加上参与比例 $0.5$ 带来数据量与参与异质($n_k$ 不等、参与速率不等,正是命题 2a 重加权所处理的设定)。这也是 FedCoP 的联邦估计本应发挥作用最大的体制。ChestX-ray14 以"No Finding"图像为多数类;我们不将该多数类在客户端间均分(那样不论 $\text{shots}$ 多少,每个客户端都会被塞入数千张负样本),而是按各客户端阳性图数比例分配 No-Finding:$n_{\text{NF}}^{(k)} \approx |\text{NF}| \cdot n_{\text{pos}}^{(k)} / |\text{pos}|$,使每客户端的阴:阳比跟随全局比例,且客户端数据量随 $\text{ways}\times\text{shots}$ 缩放,符合 few-shot 设定本意。
 - **第二数据集(跨模态泛化)。** MuReD(多标签视网膜病变),20 种视网膜病理,多标签眼底图,采用其标准的 1764/444 训练/验证划分,在同一 non-IID 协议下($\text{ways}{=}3$、$K{=}10$ 等)。MuReD 是对 FedCoP 刻意更难的检验:其标签共现更弱(训练集约 22% 为多标签,而 ChestX-ray14 共病更密集)且长尾(DR/NORMAL 约 396 张,低至 CRS 约 24 张)。由命题 1,可获增益随共现强度而缩减,故 MuReD 上增益较小但一致,是理论预测的结果,而非方法失效。我们报告各数据集 $\hat R$ 的平均非对角绝对值,以显化共现强度差距,并展示增益随之单调变化。
 - **骨干网络。** ImageNet 预训练 ResNet-50,$D{=}128$ 原型维度,所有方法共享以保证公平。
+- **FedCoP 推理与训练细节。** 两项实现选择,在所有 FedCoP 消融行中保持固定,以使消融只隔离 $\hat R$/$L_{co}$/解码器,而不混入这两项。(a) **解码器入口的 logit 融合。** 送入 mean-field 解码器的独立 logit,是 BCE 训练的分类器 logit 与原型马氏 logit 的凸组合:$s_c = \alpha\,\mathrm{logit}_c^{\mathrm{cls}} + (1-\alpha)(-e_c/T)$,取 $\alpha{=}0.5$、$T{=}1.0$。这使校准过的分类器始终参与,避免原型路径——在训练早期及罕见类上条件不良——主导解码概率;对尚无全局原型的类别,原型项回退为分类器 logit。mean-field 耦合 $\hat R$ 随后作用于该融合 logit,故命题 1 的保证(mean-field $\not\prec$ 独立 sigmoid)仍然成立。(b) **$L_{co}$ warmup。** $\hat R$ 自第 1 轮起即被聚合与 EMA 平滑,但直到第 $W{=}10$ 轮才送入 $L_{co}$,此时联邦估计已稳定。用早期噪声 $\hat R$ 去对齐原型几何,曾被观察到会反转消融排序(无 warmup 时完整 $<$ `--no_cooccurrence`);warmup 消除了这一倒挂,恢复预期的完整 $>$ `--no_cooccurrence`。
 - **基线。** FedAvg、FedProx、FedProto、FedGMKD、FedBCS、FedSeProto,权重共享、近端、原型共享三族。我们在同一骨干与划分下重新实现原型基线以做受控对比;凡重新实现是对原方法的简化(如 FedBCS 用 1D InstanceNorm 重校准替代原频域分离),我们都明确说明,而非悄然继承优势。
 - **指标。** Macro/micro AUROC、macro/micro F1、Hamming loss、subset accuracy、逐类 AUROC。我们刻意以 macro 指标为首:ChestX-ray14 标签不平衡(肺不张常见、疝气罕见),而扁平的逐标签准确率被常见类的易判负样本主导;它可能朝错误方向移动,而真实诊断表现却在改善。macro-AUROC 加权了临床关心的罕见类。
 - **重复。** 3 个随机种子;报告 mean±std。
@@ -440,15 +442,18 @@ bash scripts/run.sh
 python exps/federated_main.py --alg fedcop --dataset cxray14 \
     --num_classes 14 --ways 3 --shots 50 --stdev 2 \
     --num_users 10 --frac 0.5 --rounds 30 --proto_dim 128 \
-    --ld 1.0 --ld_warmup 20 --co_lambda 0.1 --ent_lambda 1e-3 --no_cooccurrence
+    --ld 1.0 --ld_warmup 20 --co_lambda 0.1 --ent_lambda 1e-3 \
+    --co_warmup 10 --fuse_alpha 0.5 --temperature 1.0 --no_cooccurrence
 python exps/federated_main.py --alg fedcop --dataset cxray14 \
     --num_classes 14 --ways 3 --shots 50 --stdev 2 \
     --num_users 10 --frac 0.5 --rounds 30 --proto_dim 128 \
-    --ld 1.0 --ld_warmup 20 --co_lambda 0.1 --ent_lambda 1e-3 --local_cooc_only
+    --ld 1.0 --ld_warmup 20 --co_lambda 0.1 --ent_lambda 1e-3 \
+    --co_warmup 10 --fuse_alpha 0.5 --temperature 1.0 --local_cooc_only
 python exps/federated_main.py --alg fedcop --dataset cxray14 \
     --num_classes 14 --ways 3 --shots 50 --stdev 2 \
     --num_users 10 --frac 0.5 --rounds 30 --proto_dim 128 \
-    --ld 1.0 --ld_warmup 20 --co_lambda 0.1 --ent_lambda 1e-3 --no_lco
+    --ld 1.0 --ld_warmup 20 --co_lambda 0.1 --ent_lambda 1e-3 \
+    --co_warmup 10 --fuse_alpha 0.5 --temperature 1.0 --no_lco
 ```
 
 **【中文】** ### 6.3 运行
@@ -465,15 +470,18 @@ bash scripts/run.sh
 python exps/federated_main.py --alg fedcop --dataset cxray14 \
     --num_classes 14 --ways 3 --shots 50 --stdev 2 \
     --num_users 10 --frac 0.5 --rounds 30 --proto_dim 128 \
-    --ld 1.0 --ld_warmup 20 --co_lambda 0.1 --ent_lambda 1e-3 --no_cooccurrence
+    --ld 1.0 --ld_warmup 20 --co_lambda 0.1 --ent_lambda 1e-3 \
+    --co_warmup 10 --fuse_alpha 0.5 --temperature 1.0 --no_cooccurrence
 python exps/federated_main.py --alg fedcop --dataset cxray14 \
     --num_classes 14 --ways 3 --shots 50 --stdev 2 \
     --num_users 10 --frac 0.5 --rounds 30 --proto_dim 128 \
-    --ld 1.0 --ld_warmup 20 --co_lambda 0.1 --ent_lambda 1e-3 --local_cooc_only
+    --ld 1.0 --ld_warmup 20 --co_lambda 0.1 --ent_lambda 1e-3 \
+    --co_warmup 10 --fuse_alpha 0.5 --temperature 1.0 --local_cooc_only
 python exps/federated_main.py --alg fedcop --dataset cxray14 \
     --num_classes 14 --ways 3 --shots 50 --stdev 2 \
     --num_users 10 --frac 0.5 --rounds 30 --proto_dim 128 \
-    --ld 1.0 --ld_warmup 20 --co_lambda 0.1 --ent_lambda 1e-3 --no_lco
+    --ld 1.0 --ld_warmup 20 --co_lambda 0.1 --ent_lambda 1e-3 \
+    --co_warmup 10 --fuse_alpha 0.5 --temperature 1.0 --no_lco
 ```
 
 ---
