@@ -1134,6 +1134,19 @@ def _proto_aggregation_FedGMKD(local_protos_list):
             q_t = torch.stack(qualities)
             q_sum = q_t.sum() + 1e-8
 
+            # 各客户端 GMM 分量数 K 可能不同(样本不足者退化为单高斯 K=1)。
+            # 按 max K 零填充后再 stack,避免形状不匹配;零权分量对加权和无影响。
+            k_max = max(w.shape[0] for w in all_w)
+            def _pad_k(t):
+                if t.shape[0] == k_max:
+                    return t
+                pad_shape = list(t.shape)
+                pad_shape[0] = k_max - t.shape[0]
+                return torch.cat([t, torch.zeros(pad_shape, device=t.device, dtype=t.dtype)], dim=0)
+            all_w = [_pad_k(w) for w in all_w]
+            all_m = [_pad_k(m) for m in all_m]
+            all_lv = [_pad_k(lv) for lv in all_lv]
+
             # 质量加权融合
             fused_w = torch.stack([w * q for w, q in zip(all_w, qualities)]).sum(dim=0) / q_sum
             fused_m = torch.stack([m * q for m, q in zip(all_m, qualities)]).sum(dim=0) / q_sum
