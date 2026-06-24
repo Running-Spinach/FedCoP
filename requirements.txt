@@ -1,9 +1,16 @@
 # =============================================================================
 # FedCoP — Python dependencies
 # =============================================================================
-# Install: pip install -r requirements.txt
+# ✅ GPU 版 PyTorch(已直接配好 CUDA 12.8,下面 torch/torchvision 行会从
+#    官方 GPU 索引安装):
+#     pip install -r requirements.txt
+#   验证:python -c "import torch; print(torch.cuda.is_available())"  → 应输出 True
+#
+# 若你的 CUDA 不是 12.8,把下面两行的 cu128 换成对应版本
+# (cu118 / cu121 / cu124 等,见 https://pytorch.org/get-started/locally/)
 #
 # Core (required — all algorithms)
+--extra-index-url https://download.pytorch.org/whl/cu128
 torch>=2.0
 torchvision>=0.15
 numpy>=1.21
