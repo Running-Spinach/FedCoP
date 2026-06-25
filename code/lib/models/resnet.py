@@ -2,7 +2,7 @@
 # 模型定义:ResNet-50 骨干,适配 ChestX-ray14 多标签分类与原型提取
 # =============================================================================
 # 两个模型类:
-#   1. ResNet50     — 基线模型(FedAvg/FedProto/FedProx/FedGMKD/FedBCS/FedSeProto 用)
+#   1. ResNet50     — 基线模型(FedAvg/FedProto/FedProx/FedGMKD/FedSeProto 用)
 #   2. FedCoPResNet — FedCoP 提出方法(ImageNet 预训练 + 概率原型头)
 #
 # FedCoPResNet 的设计刻意精简:骨干 → fc1(原型特征)→ ProbabilisticProtoHead(μ,logvar)

@@ -1,0 +1,338 @@
+# =============================================================================
+# FedCoP 实验命令速查表
+# =============================================================================
+# 生成日期: 2026-06-25
+# 所有命令在项目根目录 FedCoP/ 下执行
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 一、环境准备
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 安装依赖 (CUDA 12.8)
+pip install -r requirements.txt
+
+# 验证 GPU 可用
+python -c "import torch; print(torch.cuda.is_available())"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 二、快速烟测 (3轮, 单seed, 验证通路不崩)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 所有算法 × 两个数据集 (chestxray14 + mured)
+bash code/scripts/run_test.sh
+
+# 仅 FedCoP × 两个数据集
+bash code/scripts/run_test.sh fedcop
+
+# 仅指定数据集
+DATASETS=mured bash code/scripts/run_test.sh
+DATASETS=mured bash code/scripts/run_test.sh fedcop
+DATASETS="chestxray14 mured" bash code/scripts/run_test.sh
+
+# 参数: rounds=3 users=5 ways=7(chestxray)/10(mured)=总类50% shots=20 stdev=1 frac=0.4 proto_dim=32 train_ep=5
+# FedCoP 额外: ld_warmup=2 co_warmup=0 (烟测不 warmup)
+# FedGMKD 用 gmm_components=2 (烟测轻量)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 三、完整 Benchmark (20轮, 单/多 seed, mean±std 汇总)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 所有算法 (9个: fedavg, fedprox, fedproto, fedgmkd, fedseproto,
+#           fedcop, fedcop_nocoo, fedcop_local, fedcop_nolco)
+bash code/scripts/run.sh
+
+# 仅 FedCoP
+bash code/scripts/run.sh fedcop
+
+# 仅某个基线
+bash code/scripts/run.sh fedproto
+bash code/scripts/run.sh fedgmkd
+
+# Dry-run (只打印命令不执行, 检查参数)
+bash code/scripts/run.sh --dry-run
+bash code/scripts/run.sh --dry-run fedcop
+
+# 换数据集
+DATASET=mured bash code/scripts/run.sh
+DATASET=mured bash code/scripts/run.sh fedcop
+
+# 参数: rounds=20 users=10 ways=7(chestxray)/10(mured)=总类50% shots=50 stdev=2 frac=0.5 proto_dim=128
+#       local_bs=16 train_ep=5 seeds=(1234)
+# FedCoP: co_lambda=0.1 cov_shrinkage=0.1 co_beta=1.0 co_mf_steps=2
+#          ent_lambda=1e-3 proto_momentum=0.9 temperature=1.0
+#          ld_warmup=10 co_warmup=5 fuse_alpha=0.5
+# FedGMKD: gmm_components=3
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 四、消融实验 (A0-A9, 20轮, 与 benchmark 同参数规模)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 全部消融 (A0~A9)
+bash code/scripts/ablation.sh
+
+# 单个消融
+bash code/scripts/ablation.sh A0     # 完整方法 (baseline)
+bash code/scripts/ablation.sh A1     # no L_co (训练侧共现对齐关)
+bash code/scripts/ablation.sh A2     # no structure decode (R=I, 独立 sigmoid)
+bash code/scripts/ablation.sh A3     # point proto (MSE 距离, 无熵正则)
+bash code/scripts/ablation.sh A4     # no L_ent (熵正则关)
+bash code/scripts/ablation.sh A5     # decode=纯分类器 (fuse_alpha=1)
+bash code/scripts/ablation.sh A6     # decode=纯原型 (fuse_alpha=0)
+bash code/scripts/ablation.sh A7     # local cooc (非联邦 R)
+bash code/scripts/ablation.sh A8     # W2 距离 (替代 KL)
+bash code/scripts/ablation.sh A9     # temperature=10 (诊断 logit 饱和)
+
+# Dry-run + 换数据集
+bash code/scripts/ablation.sh --dry-run
+bash code/scripts/ablation.sh --dry-run A3
+DATASET=mured bash code/scripts/ablation.sh
+
+# 消融变体速查:
+#   A0: full                              (无额外 flag)
+#   A1: no L_co                           --no_lco
+#   A2: no structure decode               --no_cooccurrence
+#   A3: point proto                       --dist_type mse --ent_lambda 0
+#   A4: no L_ent                          --ent_lambda 0
+#   A5: decode=纯分类器                   --fuse_alpha 1.0
+#   A6: decode=纯原型                     --fuse_alpha 0.0
+#   A7: local cooc                        --local_cooc_only
+#   A8: W2 距离                           --dist_type wasserstein
+#   A9: temperature=10                    --temperature 10
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 五、直接用 Python 跑单个实验 (最低层级, 所有参数可控)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# --- 通用参数模板 ---
+# 注意: 下面的 "..." 需要替换成完整参数, 或靠 argparse default 值
+
+# --- 基线算法 ---
+python code/exps/federated_main.py --alg fedavg
+
+python code/exps/federated_main.py --alg fedprox --fedprox_mu 0.01
+
+python code/exps/federated_main.py --alg fedproto
+
+python code/exps/federated_main.py --alg fedgmkd --gmm_components 3
+
+python code/exps/federated_main.py --alg fedseproto --mi_lambda 0.05
+
+# --- FedCoP 完整方法 (benchmark 超参) ---
+python code/exps/federated_main.py --alg fedcop \
+    --dataset chestxray14 --num_classes 14 \
+    --num_users 10 --ways 7 --shots 50 --stdev 2 \
+    --rounds 20 --frac 0.5 --ld 1.0 --proto_dim 128 \
+    --local_bs 16 --train_ep 5 \
+    --co_lambda 0.1 --cov_shrinkage 0.1 --co_beta 1.0 --co_mf_steps 2 \
+    --ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 \
+    --ld_warmup 10 --co_warmup 5 --fuse_alpha 0.5 \
+    --seed 1234
+
+# --- FedCoP 消融 (逐个开关) ---
+# R̂ = I (关共现结构)
+python code/exps/federated_main.py --alg fedcop \
+    --co_lambda 0.1 --cov_shrinkage 0.1 --co_beta 1.0 --co_mf_steps 2 \
+    --ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 --ld_warmup 10 \
+    --no_cooccurrence
+
+# 只用本地共现 (不联邦聚合 R)
+python code/exps/federated_main.py --alg fedcop \
+    --co_lambda 0.1 --cov_shrinkage 0.1 --co_beta 1.0 --co_mf_steps 2 \
+    --ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 --ld_warmup 10 \
+    --local_cooc_only
+
+# 关训练侧 L_co
+python code/exps/federated_main.py --alg fedcop \
+    --co_lambda 0.1 --cov_shrinkage 0.1 --co_beta 1.0 --co_mf_steps 2 \
+    --ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 --ld_warmup 10 \
+    --no_lco
+
+# --- 烟测规模 (快速调试用) ---
+python code/exps/federated_main.py --alg fedcop \
+    --dataset chestxray14 --num_classes 14 \
+    --num_users 5 --ways 7 --shots 20 --stdev 1 \
+    --rounds 3 --frac 0.4 --ld 1.0 --proto_dim 32 \
+    --train_ep 5 --seed 1234 \
+    --co_lambda 0.1 --cov_shrinkage 0.1 --co_beta 1.0 --co_mf_steps 2 \
+    --ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 \
+    --ld_warmup 2 --co_warmup 0 --fuse_alpha 0.5
+
+# --- 换 MuReD 数据集 (20类, 眼底图像) ---
+python code/exps/federated_main.py --alg fedcop \
+    --dataset mured --num_classes 20 \
+    --num_users 10 --ways 10 --shots 50 --stdev 2 \
+    --rounds 20 --frac 0.5 --ld 1.0 --proto_dim 128 \
+    --local_bs 16 --train_ep 5 \
+    --co_lambda 0.1 --cov_shrinkage 0.1 --co_beta 1.0 --co_mf_steps 2 \
+    --ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 \
+    --ld_warmup 10 --co_warmup 5 --fuse_alpha 0.5 \
+    --seed 1234
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 六、t-SNE 可视化 (后处理, 需先跑完实验保存原型)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 多算法对比 (并排子图)
+python code/lib/visualize.py \
+    --algs fedproto fedgmkd fedseproto fedcop \
+    --num_classes 14 --proto_dir ./protos_vis
+
+# 单算法
+python code/lib/visualize.py \
+    --alg fedcop --num_classes 14 --proto_dir ./protos_vis
+
+# 指定输出路径和 seed
+python code/lib/visualize.py \
+    --alg fedcop --num_classes 14 --proto_dir ./protos_vis \
+    --save_path ./figs/tsne_fedcop.pdf --seed 1234
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 七、完整 CLI 参数速查 (来自 code/lib/options.py)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# --- 联邦学习基础参数 ---
+# --rounds 100            全局通信轮数
+# --num_users 20          客户端数量 K
+# --frac 0.25             每轮参与客户端比例
+# --train_ep 1            本地训练 epoch 数
+# --local_bs 4            本地 batch size
+# --lr 0.01               学习率
+# --momentum 0.5           SGD 动量
+
+# --- 模型与算法 ---
+# --alg fedcop            fedavg | fedprox | fedproto | fedgmkd | fedseproto | fedcop
+# --model resnet50        resnet50 | cnn
+# --norm batch_norm       batch_norm | layer_norm | None
+# --num_filters 32        仅 CNN
+# --max_pool True          仅 CNN
+
+# --- 数据集 ---
+# --dataset chestxray14   chestxray14 | mured
+# --num_classes 14        14 (ChestX-ray14) | 20 (MuReD)
+# --data_dir ./data/      数据集根目录
+# --image_size 224        输入图像尺寸
+
+# --- 硬件 / 训练 ---
+# --gpu 0                 GPU ID (默认 CPU)
+# --optimizer sgd         sgd | adam
+# --seed 1234             随机种子
+# --iid 0                 0=Non-IID | 1=IID
+# --unequal 0             0=等量 | 1=不等量
+# --stopping_rounds 10    早停容忍轮数
+# --test_ep 10            测试间隔轮数
+# --verbose 1             0=静默 | 1=详细
+
+# --- Non-IID 划分 ---
+# --ways 3                每客户端类别数 (越小越 Non-IID)
+# --shots 100             每类样本数 (每个客户端)
+# --train_shots_max 200   每类最大训练样本数
+# --test_shots 15         每类测试样本数
+# --stdev 2               类别数/样本数的标准差
+
+# --- 原型学习 (FedProto / FedCoP 共用) ---
+# --ld 1.0                原型损失权重 λ
+# --ld_warmup 50          原型损失 warmup 轮数
+# --proto_momentum 0.9    EMA 动量 (原型 + R̂)
+# --ft_round 10           微调轮数 (实验性)
+
+# --- 分布原型 ---
+# --use_distributional    启用高斯原型 (FedCoP 始终启用)
+# --dist_type kl          kl | wasserstein | mse
+# --proto_dim None        None=自动 | 正整数
+
+# --- FedCoP 共现结构 (核心创新) ---
+# --co_lambda 0.1          L_co 权重
+# --co_warmup 10           L_co warmup 轮数
+# --cov_shrinkage 0.1      R̂ 收缩系数 η
+# --co_rank 0              R̂ 低秩近似 (0=全秩)
+# --co_beta 1.0            mean-field 耦合强度 β
+# --co_mf_steps 2          mean-field 迭代步数
+# --ent_lambda 0.001       熵正则权重
+# --fuse_alpha 0.5         分类器/原型融合权重 α
+# --temperature 1.0        推理温度 T
+
+# --- FedCoP 消融开关 ---
+# --no_cooccurrence        R̂=I, 关共现结构
+# --local_cooc_only        只用本地共现, 不联邦聚合
+# --no_lco                 关训练侧 L_co, 保留推理侧 R̂
+
+# --- 基线专属参数 ---
+# --fedprox_mu 0.01        FedProx 近端正则系数
+# --gmm_components 3       FedGMKD GMM 分量数 K
+# --mi_lambda 0.05         FedSeProto 互信息最小化权重
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 八、算法列表总览
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 基线方法 (5个):
+#   fedavg       — 权重平均 (AISTATS 2017)
+#   fedprox      — 权重平均 + 近端正则 (MLSys 2020)
+#   fedproto     — 点原型 + 最近邻 (AAAI 2022)
+#   fedgmkd      — GMM 原型 (NeurIPS 2024)
+#   fedseproto   — 语义域解耦 (ECAI 2024)
+
+# 提出方法:
+#   fedcop       — 共现感知分布原型 (Proposed)
+#     fedcop_nocoo   — 消融: R̂=I (关共现结构)
+#     fedcop_local   — 消融: 非联邦 R (只用本地)
+#     fedcop_nolco   — 消融: 关训练侧 L_co
+
+# 消融变体 (A0-A9):
+#   A0: 完整方法
+#   A1: no L_co (训练侧共现对齐)
+#   A2: no structure decode (R=I)
+#   A3: point proto (MSE, 无熵)
+#   A4: no L_ent
+#   A5: decode=纯分类器 (α=1)
+#   A6: decode=纯原型 (α=0)
+#   A7: local cooc (非联邦 R)
+#   A8: W2 距离 (替代 KL)
+#   A9: temperature=10 (诊断)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 九、常用组合场景
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 场景1: 快速验证代码能跑 → 烟测
+bash code/scripts/run_test.sh fedcop
+
+# 场景2: 调参阶段, 单 seed 看趋势 → 单算法 benchmark
+bash code/scripts/run.sh fedcop
+
+# 场景3: 定稿出表, 多 seed → 修改 run.sh 中 SEEDS=(1234 5678 9012)
+#        然后跑全部
+bash code/scripts/run.sh
+
+# 场景4: 消融实验出表 → 修改 ablation.sh 中 SEEDS 后
+bash code/scripts/ablation.sh
+
+# 场景5: 跨数据集泛化验证
+DATASET=mured bash code/scripts/run_test.sh fedcop   # 先烟测
+DATASET=mured bash code/scripts/run.sh               # 再完整跑
+
+# 场景6: 只跑基线和 FedCoP (跳过消融), 手动选择
+bash code/scripts/run.sh fedavg
+bash code/scripts/run.sh fedprox
+bash code/scripts/run.sh fedproto
+bash code/scripts/run.sh fedgmkd
+bash code/scripts/run.sh fedseproto
+bash code/scripts/run.sh fedcop
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 十、日志与输出
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# run.sh      → logs/benchmark_YYYYMMDD_HHMMSS/
+# run_test.sh → logs/test_YYYYMMDD_HHMMSS/<dataset>/
+# ablation.sh → logs/ablation_YYYYMMDD_HHMMSS/
+# 每个目录下有 _results.tsv (或 _ablation.tsv) 汇总表, 以及每个 run 的 .log 文件

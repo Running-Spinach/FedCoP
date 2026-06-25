@@ -5,7 +5,7 @@
 #   1. DatasetSplit — 数据集分割工具
 #   2. LocalUpdate — 客户端本地训练类(含所有算法的训练函数)
 #   3. 评估函数 — 多标签测试推理
-#   4. 三个基线算法 — FedGMKD, FedBCS, FedSeProto
+#   4. 两个基线算法 — FedGMKD, FedSeProto
 #
 # 最重要的函数是 update_weights_FedCoP,FedCoP 的核心训练逻辑。
 # 建议阅读顺序:
@@ -98,7 +98,6 @@ class LocalUpdate(object):
     - update_weights_scaffold  → SCAFFOLD
     - update_weights_FedCoP    → FedCoP(提出方法)★ 核心
     - _update_weights_FedGMKD  → FedGMKD（GMM 基线）
-    - _update_weights_FedBCS   → FedBCS（频域风格重校准基线）
     - _update_weights_FedSeProto → FedSeProto（语义-域解耦基线）
     """
 
@@ -664,7 +663,10 @@ class LocalUpdate(object):
 def eval_clients_multilabel(args, local_model_list, test_dataset, user_groups_gt):
     """多标签联邦学习统一评估
 
-    每个客户端用 sigmoid(logits) > 0.5 对本地测试集做 per-label 准确率。
+    每个客户端用 sigmoid(logits) > 0.5 对本地测试集做 per-label 准确率,
+    并跨客户端累积概率/标签,统一计算 macro/micro AUROC、F1 等完整指标
+    (与 FedCoP 的 test_inference_FedCoP 用同一套 compute_multilabel_metrics,
+    保证基线与 FedCoP 在同一指标下可比)。
 
     参数:
         args:             全局配置
@@ -677,6 +679,7 @@ def eval_clients_multilabel(args, local_model_list, test_dataset, user_groups_gt
     """
     device = args.device
     acc_list = []
+    all_probs, all_labels = [], []          # 跨客户端累积,用于整体指标
 
     # IID 模式或无本地测试划分时，所有客户端共享同一个测试集
     if user_groups_gt is None:
@@ -697,13 +700,26 @@ def eval_clients_multilabel(args, local_model_list, test_dataset, user_groups_gt
                 output = model(images)
                 outputs = output[0] if isinstance(output, tuple) else output
 
-                preds = (torch.sigmoid(outputs) > 0.5).float()
+                probs = torch.sigmoid(outputs)
+                preds = (probs > 0.5).float()
                 correct_val += (preds == labels).float().sum().item()
                 total_val += labels.numel()
+
+                all_probs.append(probs.detach().cpu())
+                all_labels.append(labels.detach().cpu())
 
         acc = correct_val / total_val
         print('| User: {} | Test Acc (per-label): {:.4f}'.format(idx, acc))
         acc_list.append(acc)
+
+    # ── 跨客户端整体多标签指标(AUROC/F1/Hamming/subset)──
+    # 打印 AUROC(macro/micro)=... 行,供 run.sh 的 grep 抓取,与 FedCoP 对齐
+    if len(all_probs) > 0:
+        probs_all = torch.cat(all_probs, dim=0).numpy()
+        labels_all = torch.cat(all_labels, dim=0).numpy()
+        metrics = compute_multilabel_metrics(probs_all, labels_all,
+                                             num_classes=args.num_classes)
+        print('[baseline metrics] ' + format_metrics(metrics))
 
     return acc_list
 
@@ -715,16 +731,18 @@ def eval_clients_multilabel(args, local_model_list, test_dataset, user_groups_gt
 def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list, user_groups_gt, global_protos=[]):
     """FedProto 测试推理（多标签适配版）
 
-    对 ChestX-ray14 多标签场景，使用 BCEWithLogitsLoss + sigmoid 阈值预测。
-    同时保留全局原型最近邻分类的能力（per-label 匹配）。
+    两条评估路径:
+      - w/o protos:纯分类器 sigmoid(logits) > 0.5
+      - w/ protos :纯原型预测(与官方 FedProto 一致)——对每类 c 计算
+        d_c = ‖emb − proto_c‖² (MSE),s_c = −d_c/temperature,
+        pred_c = sigmoid(s_c) > 0.5。无全局原型的类预测为负。
 
     返回:
         acc_list_l: 各客户端模型自身分类器的 per-label 准确率
-        acc_list_g: 各客户端使用全局原型最近邻的 per-label 准确率
-        loss_list:  各客户端的原型损失
+        acc_list_g: 各客户端使用全局原型预测的 per-label 准确率
+        loss_list:  各客户端正样本到全局原型的平均 MSE 距离(诊断)
     """
     device = args.device
-    loss_mse = nn.MSELoss()
 
     acc_list_g = []
     acc_list_l = []
@@ -751,32 +769,49 @@ def test_inference_new_het_lt(args, local_model_list, test_dataset, classes_list
         print('| User: {} | Test Acc w/o protos: {:.4f}'.format(idx, acc_l))
         acc_list_l.append(acc_l)
 
-        # ── 使用全局原型的最近邻分类测试 ──
+        # ── 使用全局原型的原型预测(与官方 FedProto 一致)──
+        # 对每类 c:d_c = ‖emb − proto_c‖² (MSE,与官方距离度量一致)
+        #              s_c = −d_c / temperature → 越近 logit 越高
+        #              pred_c = sigmoid(s_c) > 0.5
+        # 无全局原型的类给极小 logit → sigmoid≈0 → 预测负
         if global_protos:
+            temperature = getattr(args, 'temperature', 1.0)
             correct_g, total_g = 0.0, 0.0
             proto_loss_sum = 0.0
             proto_count = 0
+            _diag_printed = False
             with torch.no_grad():
                 for images, labels in testloader:
                     images, labels = images.to(device), labels.to(device)
                     output = model(images)
 
                     if isinstance(output, tuple):
-                        logits, protos = output[0], output[1] if len(output) >= 2 else output[0]
+                        protos = output[1] if len(output) >= 2 else output[0]
                     else:
-                        logits, protos = output, output
+                        protos = output
 
-                    # 全局原型最近邻：对每个样本的每个正标签，找对应全局原型
-                    for i in range(images.shape[0]):
-                        sample_proto = protos[i]
-                        for c in range(args.num_classes):
-                            if labels[i, c] > 0 and c in global_protos:
-                                gproto = global_protos[c]
-                                gvec = gproto[0] if isinstance(gproto, tuple) else gproto
-                                proto_loss_sum += loss_mse(sample_proto, gvec).item()
-                                proto_count += 1
+                    B = images.shape[0]
+                    s = torch.full((B, args.num_classes), -1e9, device=device)
+                    for c in range(args.num_classes):
+                        if c in global_protos:
+                            gproto = global_protos[c]
+                            gvec = gproto[0] if isinstance(gproto, tuple) else gproto
+                            d_c = ((protos - gvec) ** 2).sum(dim=1)   # (B,) MSE 距离
+                            s[:, c] = -d_c / temperature
+                            # 诊断:正样本到全局原型的距离
+                            pos_mask = labels[:, c] > 0
+                            if pos_mask.any():
+                                proto_loss_sum += d_c[pos_mask].sum().item()
+                                proto_count += int(pos_mask.sum().item())
 
-                    preds = (torch.sigmoid(logits) > 0.5).float()
+                    # 首客户端首批:打印 σ(s_proto) 量级,诊断 temperature 是否饱和
+                    if not _diag_printed and idx == 0:
+                        print(f'  [proto-decode-diag] mean σ(s_proto)='
+                              f'{torch.sigmoid(s).mean().item():.4f} '
+                              f'(若 ≈0 或 ≈1 → 原型 logit 饱和,需调大 --temperature)')
+                        _diag_printed = True
+
+                    preds = (torch.sigmoid(s) > 0.5).float()
                     correct_g += (preds == labels).float().sum().item()
                     total_g += labels.numel()
 
@@ -1171,132 +1206,6 @@ def _proto_aggregation_FedGMKD(local_protos_list):
 
     return global_protos
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  FedBCS (AAAI 2026): Frequency-Domain Style Recalibration
-#  对比基线，核心区别于 FedCoP:
-#    - 频域风格-内容分离（AdaptiveIN 1D 适配版）vs 可学习门控解耦
-#    - 单一风格重校准 vs HSIC + 对抗 + 对比三重机制
-#    - 点原型 vs 分布原型
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class StyleRecalibration1D(nn.Module):
-    """FedBCS 风格重校准模块（1D 特征适配版）
-
-    原始 FedBCS 用 FFT 在频域分离振幅（风格）和相位（内容），
-    这里用 InstanceNorm 做 1D 特征适配：去风格 + 可学习仿射参数重校准。
-
-    工作原理：
-    - InstanceNorm 减去均值、除以标准差 → 去除"客户端风格"
-    - gamma/beta 仿射变换 → 学习全局一致的"校准风格"
-    """
-
-    def __init__(self, dim):
-        super().__init__()
-        self.gamma = nn.Parameter(torch.ones(dim))
-        self.beta = nn.Parameter(torch.zeros(dim))
-
-    def forward(self, x):
-        mean = x.mean(dim=0, keepdim=True)
-        std = x.std(dim=0, keepdim=True) + 1e-8
-        x_norm = (x - mean) / std           # 去风格
-        return self.gamma * x_norm + self.beta  # 全局重校准
-
-
-def _update_weights_FedBCS(self, args, idx, global_protos, model, global_round=0, ld=None):
-    """FedBCS 本地训练：风格重校准 + 原型正则化
-
-    损失 = L_CE + ld × ||recalibrated_proto - global_proto||²
-    """
-    if ld is None:
-        ld = args.ld
-    model.train()
-    epoch_loss = {'total': [], '1': [], '2': []}
-    use_dist = getattr(args, 'use_distributional', False)
-    proto_dim = getattr(args, 'proto_dim', 256) or 256
-
-    # 延迟初始化风格重校准模块
-    if not hasattr(self, 'style_recal'):
-        self.style_recal = StyleRecalibration1D(proto_dim).to(self.device)
-
-    if self.args.optimizer == 'sgd':
-        optimizer = torch.optim.SGD(
-            list(model.parameters()) + list(self.style_recal.parameters()),
-            lr=self.args.lr, momentum=0.5)
-    elif self.args.optimizer == 'adam':
-        optimizer = torch.optim.Adam(
-            list(model.parameters()) + list(self.style_recal.parameters()),
-            lr=self.args.lr, weight_decay=1e-4)
-
-    for iter in range(self.args.train_ep):
-        batch_loss = {'total': [], '1': [], '2': []}
-        agg_protos_label = {}
-
-        for batch_idx, (images, label_g) in enumerate(self.trainloader):
-            images, labels = images.to(self.device), label_g.to(self.device)
-            model.zero_grad()
-            output = model(images)
-
-            if use_dist:
-                logits, mu, logvar = output
-                proto_raw = mu
-            else:
-                logits, protos = output
-                proto_raw = protos
-
-            loss1 = self.criterion(logits, labels)
-            proto_recal = self.style_recal(proto_raw)  # 风格重校准
-
-            loss_mse = nn.MSELoss()
-            if len(global_protos) == 0:
-                loss2 = 0 * loss1
-            else:
-                loss2 = 0.0
-                count = 0
-                for i_lbl in range(len(labels)):
-                    for lbl_idx in range(args.num_classes):
-                        if labels[i_lbl, lbl_idx] > 0 and lbl_idx in global_protos:
-                            g_val = global_protos[lbl_idx]
-                            if isinstance(g_val, tuple):
-                                g_mu = g_val[0] if isinstance(g_val, tuple) else g_val
-                                loss2 += loss_mse(proto_recal[i_lbl:i_lbl + 1], g_mu.unsqueeze(0))
-                            else:
-                                loss2 += loss_mse(proto_recal[i_lbl:i_lbl + 1], g_val.unsqueeze(0))
-                            count += 1
-                loss2 = loss2 / max(count, 1)
-
-            loss = loss1 + loss2 * ld
-            loss.backward()
-            optimizer.step()
-
-            for i_lbl in range(len(labels)):
-                for lbl_idx in range(args.num_classes):
-                    if label_g[i_lbl, lbl_idx] > 0:
-                        if use_dist:
-                            proto_val = (proto_recal[i_lbl, :].detach(), logvar[i_lbl, :].detach())
-                        else:
-                            proto_val = proto_recal[i_lbl, :].detach()
-                        if lbl_idx in agg_protos_label:
-                            agg_protos_label[lbl_idx].append(proto_val)
-                        else:
-                            agg_protos_label[lbl_idx] = [proto_val]
-
-            preds = (torch.sigmoid(logits) > 0.5).float()
-            acc_val = (preds == labels).float().mean()
-
-            batch_loss['total'].append(loss.item())
-            batch_loss['1'].append(loss1.item())
-            batch_loss['2'].append(loss2.item() if isinstance(loss2, torch.Tensor) else loss2)
-
-        for key in epoch_loss:
-            if len(batch_loss[key]) > 0:
-                epoch_loss[key].append(sum(batch_loss[key]) / len(batch_loss[key]))
-
-    for key in epoch_loss:
-        if len(epoch_loss[key]) > 0:
-            epoch_loss[key] = sum(epoch_loss[key]) / len(epoch_loss[key])
-
-    return model.state_dict(), epoch_loss, acc_val.item(), agg_protos_label
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

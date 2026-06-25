@@ -346,8 +346,6 @@ def exp_details(args):
         print(f'    FedProx mu         : {getattr(args, "fedprox_mu", 0.01)}')
     if args.alg == 'fedgmkd':
         print(f'    GMM components     : {getattr(args, "gmm_components", 3)}')
-    if args.alg == 'fedbcs':
-        print('    Style recalibration : AdaptiveIN (1D)')
     if args.alg == 'fedseproto':
         print(f'    MI lambda           : {getattr(args, "mi_lambda", 0.05)}')
 

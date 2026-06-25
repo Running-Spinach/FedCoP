@@ -29,9 +29,9 @@ CYAN=$'\033[0;36m'
 NC=$'\033[0m'
 
 # ── 烟测参数(极小规模,只为验证不崩)──
-ROUNDS=5
+# WAYS 不在此固定:按数据集取总类别数 50%(见逐数据集循环)
+ROUNDS=3
 NUM_USERS=5
-WAYS=3
 SHOTS=20
 STDEV=1
 LD=1.0
@@ -60,7 +60,7 @@ make_base_args() {
 }
 
 FEDCOP_FLAGS="--co_lambda 0.1 --cov_shrinkage 0.1 --co_beta 1.0 --co_mf_steps 2 \
---ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 --ld_warmup 3 \
+--ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 --ld_warmup 2 \
 --co_warmup 0 --fuse_alpha 0.5"
 
 LOG_ROOT="./logs/test_$(date +%Y%m%d_%H%M%S)"
@@ -131,7 +131,6 @@ ALL_ALGOS=(
     "fedprox:--alg fedprox --fedprox_mu 0.01"
     "fedproto:--alg fedproto"
     "fedgmkd:--alg fedgmkd --gmm_components 2"
-    "fedbcs:--alg fedbcs"
     "fedseproto:--alg fedseproto --mi_lambda 0.05"
     "fedcop:--alg fedcop ${FEDCOP_FLAGS}"
     "fedcop_nocoo:--alg fedcop ${FEDCOP_FLAGS} --no_cooccurrence"
@@ -150,6 +149,7 @@ for DATASET in ${DATASETS}; do
         echo "${RED}未知 DATASET=${DATASET}(支持: chestxray14 / mured),跳过${NC}"
         continue
     fi
+    WAYS=$((NUM_CLASSES / 2))          # 每客户端类别数 = 总类别数 50%(chestxray→7, mured→10)
 
     BASE_ARGS=$(make_base_args "${DATASET}") || exit 1
     LOG_DIR="${LOG_ROOT}/${DATASET}"

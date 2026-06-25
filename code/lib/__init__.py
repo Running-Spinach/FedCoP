@@ -30,8 +30,6 @@ from .update import (
     _update_weights_FedGMKD,
     _agg_func_FedGMKD,
     _proto_aggregation_FedGMKD,
-    # FedBCS 组件
-    _update_weights_FedBCS,
     # FedSeProto 组件
     _update_weights_FedSeProto,
 )
@@ -53,7 +51,6 @@ __all__ = [
     'test_inference_new_het_lt', 'test_inference_FedCoP',
     'eval_clients_multilabel',
     '_update_weights_FedGMKD', '_agg_func_FedGMKD', '_proto_aggregation_FedGMKD',
-    '_update_weights_FedBCS',
     '_update_weights_FedSeProto',
     # metrics
     'compute_multilabel_metrics', 'format_metrics',

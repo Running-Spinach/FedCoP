@@ -32,9 +32,9 @@ BOLD=$'\033[1m'
 NC=$'\033[0m'
 
 # ── 共享参数(4090 友好;100 轮约数小时跑完全部)──
-ROUNDS=30
+# WAYS 不在此固定:按数据集取总类别数 50%(见下方 case 后)
+ROUNDS=20
 NUM_USERS=10
-WAYS=3
 SHOTS=50
 STDEV=2
 LD=1.0
@@ -50,6 +50,7 @@ case ${DATASET} in
     mured)       NUM_CLASSES=20 ;;
     *) echo "未知 DATASET=${DATASET}(支持: chestxray14 / mured)"; exit 1 ;;
 esac
+WAYS=$((NUM_CLASSES / 2))              # 每客户端类别数 = 总类别数 50%(chestxray→7, mured→10)
 
 BASE_ARGS="--dataset ${DATASET} --num_classes ${NUM_CLASSES} --num_users ${NUM_USERS} --ways ${WAYS} --shots ${SHOTS} \
 --stdev ${STDEV} --rounds ${ROUNDS} --frac ${FRAC} --ld ${LD} --proto_dim ${PROTO_DIM} \
@@ -57,8 +58,8 @@ BASE_ARGS="--dataset ${DATASET} --num_classes ${NUM_CLASSES} --num_users ${NUM_U
 
 # FedCoP 专属默认 flag(完整方法)
 FEDCOP_FLAGS="--co_lambda 0.1 --cov_shrinkage 0.1 --co_beta 1.0 --co_mf_steps 2 \
---ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 --ld_warmup 20 \
---co_warmup 10 --fuse_alpha 0.5"
+--ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 --ld_warmup 10 \
+--co_warmup 5 --fuse_alpha 0.5"
 
 LOG_DIR="./logs/benchmark_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "${LOG_DIR}"
@@ -91,8 +92,8 @@ run_one() {
     local acc_proto=$(grep -oP 'with protos.*mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null | tail -1 || echo "")
     local acc_model=$(grep -oP 'w/o protos.*mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null | tail -1 || echo "")
     local acc_single=$(grep -oP 'For all users, mean of per-label acc is \K[0-9.]+' "${log_file}" 2>/dev/null | tail -1 || echo "")
-    local auroc=$(grep -oP 'AUROC\(macro/micro\)=\K[0-9.]+' "${log_file}" 2>/dev/null | tail -1 || echo "")
-    # 无原型算法(fedavg/fedprox/fedgmkd/fedbcs/fedseproto)只有 acc_single
+    local auroc=$(grep -oP 'AUROC\(macro/micro\)=\K[0-9.na]+' "${log_file}" 2>/dev/null | tail -1 || echo "")
+    # 无原型算法(fedavg/fedprox/fedgmkd/fedseproto)只有 acc_single
     local use_proto="${acc_proto:-${acc_single}}"
     local use_model="${acc_model:--}"
 
@@ -122,7 +123,6 @@ ALGO_ARGS[fedavg]="${BASE_ARGS} --alg fedavg"
 ALGO_ARGS[fedprox]="${BASE_ARGS} --alg fedprox --fedprox_mu 0.01"
 ALGO_ARGS[fedproto]="${BASE_ARGS} --alg fedproto"
 ALGO_ARGS[fedgmkd]="${BASE_ARGS} --alg fedgmkd --gmm_components 3"
-ALGO_ARGS[fedbcs]="${BASE_ARGS} --alg fedbcs"
 ALGO_ARGS[fedseproto]="${BASE_ARGS} --alg fedseproto --mi_lambda 0.05"
 ALGO_ARGS[fedcop]="${BASE_ARGS} --alg fedcop ${FEDCOP_FLAGS}"
 ALGO_ARGS[fedcop_nocoo]="${BASE_ARGS} --alg fedcop ${FEDCOP_FLAGS} --no_cooccurrence"
@@ -130,7 +130,7 @@ ALGO_ARGS[fedcop_local]="${BASE_ARGS} --alg fedcop ${FEDCOP_FLAGS} --local_cooc_
 ALGO_ARGS[fedcop_nolco]="${BASE_ARGS} --alg fedcop ${FEDCOP_FLAGS} --no_lco"
 
 # 默认顺序:基线 → 提出方法 → 消融
-ALGO_ORDER=(fedavg fedprox fedproto fedgmkd fedbcs fedseproto fedcop fedcop_nocoo fedcop_local fedcop_nolco)
+ALGO_ORDER=(fedavg fedprox fedproto fedgmkd fedseproto fedcop fedcop_nocoo fedcop_local fedcop_nolco)
 
 # ═══════════════════════════════════════════════════════════════════
 #  执行

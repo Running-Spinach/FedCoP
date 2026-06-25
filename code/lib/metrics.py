@@ -92,9 +92,17 @@ def compute_multilabel_metrics(probs, labels, num_classes=None):
 
 
 def format_metrics(metrics):
-    """把指标 dict 格式化成一行可打印字符串"""
+    """把指标 dict 格式化成一行可打印字符串 (NaN 安全)"""
+    def _fmt(key):
+        v = metrics.get(key, float('nan'))
+        try:
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return 'nan'
+            return f'{float(v):.4f}'
+        except (ValueError, TypeError):
+            return 'nan'
     return (
-        f"AUROC(macro/micro)={metrics['auroc_macro']:.4f}/{metrics['auroc_micro']:.4f} | "
-        f"F1(macro/micro)={metrics['f1_macro']:.4f}/{metrics['f1_micro']:.4f} | "
-        f"Hamming={metrics['hamming_loss']:.4f} | SubsetAcc={metrics['subset_acc']:.4f}"
+        f"AUROC(macro/micro)={_fmt('auroc_macro')}/{_fmt('auroc_micro')} | "
+        f"F1(macro/micro)={_fmt('f1_macro')}/{_fmt('f1_micro')} | "
+        f"Hamming={_fmt('hamming_loss')} | SubsetAcc={_fmt('subset_acc')}"
     )

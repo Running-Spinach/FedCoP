@@ -67,11 +67,11 @@ def args_parser():
     parser.add_argument('--model', type=str, default='resnet50',
                         help='模型名称: resnet50 / cnn')
     parser.add_argument('--alg', type=str, default='fedcop',
-                        choices=['fedproto', 'fedavg', 'fedprox', 'fedgmkd', 'fedbcs',
+                        choices=['fedproto', 'fedavg', 'fedprox', 'fedgmkd',
                                  'fedseproto', 'fedcop'],
                         help='FL 算法选择。fedavg=经典平均, fedprox=近端正则基线, '
                              'fedproto=点原型基线, fedgmkd=GMM原型(NeurIPS2024), '
-                             'fedbcs=频域风格重校准(AAAI2026), fedseproto=语义域解耦(ECAI2024), '
+                             'fedseproto=语义域解耦(ECAI2024), '
                              'fedcop=FedCoP 提出方法(默认,共现感知分布原型)')
     parser.add_argument('--num_channels', type=int, default=3,
                         help="图像通道数。ChestX-ray14 原始为灰度图，通过 Grayscale(3) 转为 3 通道。")

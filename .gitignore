@@ -42,6 +42,7 @@ fh_ar5iv.html
 # Logs & visualization artifacts
 logs/
 protos_vis/
+*.log
 
 # Claude Code local tooling
 .claude/

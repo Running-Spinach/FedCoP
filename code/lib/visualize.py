@@ -5,7 +5,7 @@
 #   1) 训练流程内调用 save_protos_npy(global_protos, alg, ...) 保存各算法原型
 #   2) 独立运行:
 #        # 多算法对比(并排子图,同类同色)
-#        python lib/visualize.py --algs fedproto fedgmkd fedbcs fedseproto fedcop \
+#        python lib/visualize.py --algs fedproto fedgmkd fedseproto fedcop \
 #                                 --num_classes 14 --proto_dir ./protos_vis
 #        # 单算法
 #        python lib/visualize.py --alg fedcop --num_classes 14 --proto_dir ./protos_vis
@@ -35,7 +35,7 @@ def extract_proto_vector(entry):
     """从全局原型的单类条目提取 1D 向量 [D]。
 
     处理三种结构(各算法全局原型不同):
-      - 点原型:tensor [D]                     (FedProto / FedBCS / FedSeProto)
+      - 点原型:tensor [D]                     (FedProto / FedSeProto)
       - 分布原型 (mu, logvar):取 mu           (FedCoP)
       - GMM 原型 (weights, means, logvars):取 means 的质量加权平均  (FedGMKD)
     """
@@ -183,7 +183,7 @@ if __name__ == '__main__':
     import argparse
     p = argparse.ArgumentParser(description='FedCoP t-SNE prototype visualization')
     p.add_argument('--algs', nargs='+', default=None,
-                   help='多算法对比(并排子图),如:fedproto fedgmkd fedbcs fedseproto fedcop')
+                   help='多算法对比(并排子图),如:fedproto fedgmkd fedseproto fedcop')
     p.add_argument('--alg', default='fedcop', help='单算法名(--algs 优先)')
     p.add_argument('--num_classes', type=int, default=14)
     p.add_argument('--proto_dir', default='./protos_vis', help='原型 npy 目录')

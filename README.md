@@ -6,7 +6,7 @@ All algorithms use an **ImageNet-pretrained ResNet-50** backbone for fair compar
 
 ## Why FedCoP
 
-Existing prototype-FL methods (FedProto, FedGMKD, FedBCS, FedSeProto, …) model each of the 14 pathologies with an **independent** prototype and decode labels with **independent per-class sigmoids** — assuming the labels are conditionally independent given features. This fails in ChestX-ray14, where diseases strongly co-occur. Worse, under non-IID class partitioning (each hospital sees only ~3/14 classes), **no single client can observe the global co-occurrence structure** — it is recoverable only by federated aggregation of label statistics. FedCoP:
+Existing prototype-FL methods (FedProto, FedGMKD, FedSeProto, …) model each of the 14 pathologies with an **independent** prototype and decode labels with **independent per-class sigmoids** — assuming the labels are conditionally independent given features. This fails in ChestX-ray14, where diseases strongly co-occur. Worse, under non-IID class partitioning (each hospital sees only ~3/14 classes), **no single client can observe the global co-occurrence structure** — it is recoverable only by federated aggregation of label statistics. FedCoP:
 
 1. Estimates a global co-occurrence correlation matrix `R̂` from privacy-safe label sufficient statistics `(m_k, M_k, n_k)` aggregated by count-weighted fusion.
 2. **Training-side:** a structure loss `L_co` aligns the prototype cosine-Gram to `R̂` (co-occurring diseases → nearby prototype directions).
@@ -20,7 +20,6 @@ Existing prototype-FL methods (FedProto, FedGMKD, FedBCS, FedSeProto, …) model
 | **FedProx** | Model weights | Weight averaging + proximal term | MLSys 2020 |
 | **FedProto** | Point prototypes | Prototype regularization + nearest-neighbor | AAAI 2022 |
 | **FedGMKD** | GMM prototypes | EM-fitted GMM + discrepancy-aware aggregation | NeurIPS 2024 |
-| **FedBCS** | Frequency-calibrated prototypes | InstanceNorm-style recalibration | AAAI 2026 |
 | **FedSeProto** | Hard-split semantic/domain protos | Two-branch MLP + HSIC | ECAI 2024 |
 | **FedCoP** ★ | Gaussian prototypes + co-occurrence `R̂` | Federated co-occurrence structure + mean-field decode | **Proposed** |
 
@@ -133,7 +132,6 @@ python code/exps/federated_main.py --alg fedavg
 python code/exps/federated_main.py --alg fedprox --fedprox_mu 0.01
 python code/exps/federated_main.py --alg fedproto
 python code/exps/federated_main.py --alg fedgmkd --gmm_components 3
-python code/exps/federated_main.py --alg fedbcs
 python code/exps/federated_main.py --alg fedseproto --mi_lambda 0.05
 
 # FedCoP (proposed)
@@ -152,7 +150,7 @@ python code/exps/federated_main.py --alg fedcop --no_lco             # training-
 ### Algorithm & Federated
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--alg` | fedcop | fedavg / fedprox / fedproto / fedgmkd / fedbcs / fedseproto / fedcop |
+| `--alg` | fedcop | fedavg / fedprox / fedproto / fedgmkd / fedseproto / fedcop |
 | `--rounds` | 100 | Global communication rounds |
 | `--num_users` | 20 | Number of clients |
 | `--frac` | 0.25 | Fraction of clients per round |

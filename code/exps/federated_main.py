@@ -1,5 +1,5 @@
 # =============================================================================
-# FedCoP 联邦学习主程序入口(ChestX-ray14 + 预训练 ResNet-50)
+# FedCoP 联邦学习主程序入口(backbone 预训练 ResNet-50)
 # =============================================================================
 # 这个文件是实验的"总调度"。
 # 一句话概括:给定配置 → 加载数据 → 创建模型 → 选算法 → 训练 → 评估。
@@ -10,8 +10,7 @@
 #   3. FedProto   — 联邦原型学习(Tan et al., 2022),FedCoP 的直接基线
 #   4. FedCoP     — 提出的方法 ★(共现感知分布原型)
 #   5. FedGMKD    — GMM 原型 + 差异感知聚合(NeurIPS 2024)
-#   6. FedBCS     — 频域风格重校准(AAAI 2026)
-#   7. FedSeProto — 语义-域特征解耦(ECAI 2024)
+#   6. FedSeProto — 语义-域特征解耦(ECAI 2024)
 #
 # 运行示例:
 #   # FedCoP 完整方法(默认)
@@ -47,7 +46,6 @@ from update import (LocalUpdate, test_inference_new_het_lt,
                     eval_clients_multilabel,
                     _update_weights_FedGMKD, _agg_func_FedGMKD,
                     _proto_aggregation_FedGMKD,
-                    _update_weights_FedBCS,
                     _update_weights_FedSeProto)
 from models.resnet import FedCoPResNet, ResNet50
 from utils import (get_dataset, average_weights,
@@ -424,60 +422,6 @@ def FedGMKD_taskheter(args, train_dataset, test_dataset, user_groups,
     return acc_list
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  FedBCS (AAAI 2026): Frequency-Domain Style Recalibration
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def FedBCS_taskheter(args, train_dataset, test_dataset, user_groups,
-                      user_groups_lt, local_model_list, classes_list):
-    """FedBCS:频域风格重校准 + 域不变原型"""
-    use_dist = getattr(args, 'use_distributional', False)
-
-    global_protos = []
-    train_loss = []
-    m = max(1, int(args.frac * args.num_users))
-
-    for round in tqdm(range(args.rounds)):
-        local_weights, local_losses, local_protos = [], [], {}
-        print(f'\n | Global Training Round : {round + 1} |\n')
-
-        idxs_users = np.random.choice(args.num_users, m, replace=False)
-
-        for idx in idxs_users:
-            local_model = LocalUpdate(args=args, dataset=train_dataset,
-                                      idxs=user_groups[idx])
-            w, loss, acc, protos = _update_weights_FedBCS(
-                local_model, args, idx, global_protos,
-                model=copy.deepcopy(local_model_list[idx]),
-                global_round=round, ld=args.ld)
-
-            agg_protos = agg_func(protos, use_distributional=use_dist)
-            local_weights.append(copy.deepcopy(w))
-            local_losses.append(copy.deepcopy(loss['total']))
-            local_protos[idx] = agg_protos
-
-        for i_w, idx in enumerate(idxs_users):
-            local_model = copy.deepcopy(local_model_list[idx])
-            local_model.load_state_dict(local_weights[i_w], strict=True)
-            local_model_list[idx] = local_model
-
-        global_protos = proto_aggregation(local_protos, use_distributional=use_dist)
-        train_loss.append(sum(local_losses) / len(local_losses))
-
-    acc_list = eval_clients_multilabel(args, local_model_list, test_dataset, user_groups_lt)
-    # 保存全局原型供 t-SNE 可视化对比(FedAvg/FedProx 无全局原型,自动跳过)
-    try:
-        from visualize import save_protos_npy
-        save_protos_npy(global_protos, args.alg, args.num_classes,
-                        proto_dir=getattr(args, 'proto_dir', None) or './protos_vis')
-    except NameError:
-        pass  # 该算法无 global_protos(如 FedAvg/FedProx),跳过
-    except Exception as _e:
-        print(f"[vis] skip save protos for {args.alg}: {_e}")
-    print('For all users, mean of per-label acc is {:.5f}, std is {:.5f}'.format(
-        np.mean(acc_list), np.std(acc_list)))
-    return acc_list
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  FedSeProto (ECAI 2024): Semantic-Domain Feature Decoupling
@@ -532,6 +476,7 @@ def FedSeProto_taskheter(args, train_dataset, test_dataset, user_groups,
     return acc_list
 
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  主入口:算法调度 + 数据加载 + 模型创建
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -576,10 +521,10 @@ if __name__ == '__main__':
         classes_list, classes_list_gt = get_dataset(args, n_list, k_list)
 
     # ── 算法特定参数(必须在模型创建前设置,ResNet50.__init__ 读 use_distributional)──
-    # FedCoP / FedGMKD 始终分布原型;FedProto/FedBCS/FedSeProto 点原型
+    # FedCoP / FedGMKD 始终分布原型;FedProto/FedSeProto 点原型
     if args.alg in ('fedcop', 'fedgmkd'):
         args.use_distributional = True
-    elif args.alg in ('fedproto', 'fedbcs', 'fedseproto'):
+    elif args.alg in ('fedproto', 'fedseproto'):
         args.use_distributional = False
 
     # ── 创建模型 ──
@@ -612,9 +557,6 @@ if __name__ == '__main__':
     elif args.alg == 'fedgmkd':
         FedGMKD_taskheter(args, train_dataset, test_dataset, user_groups,
                           user_groups_lt, local_model_list, classes_list)
-    elif args.alg == 'fedbcs':
-        FedBCS_taskheter(args, train_dataset, test_dataset, user_groups,
-                         user_groups_lt, local_model_list, classes_list)
     elif args.alg == 'fedseproto':
         FedSeProto_taskheter(args, train_dataset, test_dataset, user_groups,
                              user_groups_lt, local_model_list, classes_list)
