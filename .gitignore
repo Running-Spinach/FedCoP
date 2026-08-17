@@ -47,8 +47,19 @@ protos_vis/
 # Claude Code local tooling
 .claude/
 
-# Paper (LaTeX build artifacts + source)
-paper/
+# Paper (ignore LaTeX build artifacts; source .tex/.bib/figures are tracked)
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.bbl
+paper/*.blg
+paper/*.brf
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.synctex.gz
+paper/compile.log
+paper/*.zip
+paper/FedCoP*.pdf
 
 # Delivery bundles
 FedCoP_delivery_*/
