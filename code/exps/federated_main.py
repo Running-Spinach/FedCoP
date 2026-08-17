@@ -528,7 +528,7 @@ if __name__ == '__main__':
         args.use_distributional = False
 
     # ── 创建模型 ──
-    # FedCoP 用 FedCoPResNet(预训练+概率原型头);其他算法用 ResNet50
+    # FedCoP 用 FedCoPResNet;其他算法用 ResNet50
     local_model_list = []
     for i in range(args.num_users):
         if args.alg == "fedcop":

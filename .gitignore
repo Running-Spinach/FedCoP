@@ -46,3 +46,9 @@ protos_vis/
 
 # Claude Code local tooling
 .claude/
+
+# Paper (LaTeX build artifacts + source)
+paper/
+
+# Delivery bundles
+FedCoP_delivery_*/

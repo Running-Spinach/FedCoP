@@ -130,8 +130,13 @@ class LocalUpdate(object):
             DataLoader: 训练数据加载器，drop_last=True 保证 batch 大小一致
         """
         idxs_train = idxs[:int(1 * len(idxs))]
+        num_workers = int(getattr(self.args, 'num_workers', 0))
+        pin_memory = bool(getattr(self.args, 'pin_memory', 0)) and (self.device == 'cuda')
         trainloader = DataLoader(DatasetSplit(dataset, idxs_train),
-                                 batch_size=self.args.local_bs, shuffle=True, drop_last=True)
+                                 batch_size=self.args.local_bs, shuffle=True, drop_last=True,
+                                 num_workers=num_workers,
+                                 pin_memory=pin_memory,
+                                 persistent_workers=(num_workers > 0))
         return trainloader
 
     def _get_optimizer(self, model):

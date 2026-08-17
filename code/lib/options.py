@@ -53,8 +53,14 @@ def args_parser():
                         help='每轮参与的客户端比例 C（如 0.25 表示每轮随机选 25%% 的客户端）')
     parser.add_argument('--train_ep', type=int, default=1,
                         help="本地训练轮数 E（每个客户端每轮做几个 epoch 的 SGD）")
-    parser.add_argument('--local_bs', type=int, default=4,
-                        help="本地批次大小 B（ChestX-ray14 图像大，建议 4~8）")
+    parser.add_argument('--local_bs', type=int, default=32,
+                        help="本地批次大小 B（ChestX-ray14 图像大；5090 建议 32~64）")
+    parser.add_argument('--num_workers', type=int, default=16,
+                        help="DataLoader 多进程加载进程数。0=主进程加载（慢）；"
+                             "GPU 越强越要开大以喂满算力（5090 默认 16）。"
+                             "Windows 下需保证入口有 if __name__=='__main__' 保护。")
+    parser.add_argument('--pin_memory', type=int, default=1,
+                        help="是否启用 CUDA pin_memory（1=启用，0=关闭），加速 host→device 拷贝。")
     parser.add_argument('--lr', type=float, default=0.01,
                         help='学习率（SGD/Adam 共用）')
     parser.add_argument('--momentum', type=float, default=0.5,
@@ -200,8 +206,8 @@ def args_parser():
     #  9. 训练与推理策略
     # ═══════════════════════════════════════════════════════════════════════════
 
-    parser.add_argument('--pretrained', action='store_true', default=True,
-                        help='使用 ImageNet 预训练 ResNet-50 骨干(默认开启)。')
+    parser.add_argument('--pretrained', action=argparse.BooleanOptionalAction, default=True,
+                        help='使用 ImageNet 预训练 ResNet-50 骨干(默认开启;--no-pretrained 关闭,从零训练)。')
     parser.add_argument('--proto_momentum', type=float, default=0.9,
                         help='全局原型/共现矩阵 EMA 动量系数。'
                              '0=无动量(每轮完全替换),0.9=90%%保留旧值。')

@@ -2,7 +2,7 @@
 
 Prototype-based federated learning on **NIH ChestX-ray14** (14 thoracic pathologies, chest radiography) and **MuReD** (20 retinal pathologies, fundus), where **pathology co-occurrence (comorbidity) is recovered federatedly** and used to constrain prototype geometry (training) and propagate evidence across co-occurring classes (inference). FedCoP breaks the per-class-independence assumption shared by all prior prototype-FL methods.
 
-All algorithms use an **ImageNet-pretrained ResNet-50** backbone for fair comparison. Built on [FedProto (AAAI 2022)](https://arxiv.org/abs/2105.00243), this project provides **6 FL baselines** + the proposed **FedCoP** method + 3 ablations.
+All algorithms share an **ImageNet-pretrained ResNet-50** backbone for fair comparison (on by default; `--no-pretrained` to train from scratch). Built on [FedProto (AAAI 2022)](https://arxiv.org/abs/2105.00243), this project provides **5 FL baselines** + the proposed **FedCoP** method + 3 ablations.
 
 ## Why FedCoP
 
@@ -36,7 +36,7 @@ Existing prototype-FL methods (FedProto, FedGMKD, FedSeProto, …) model each of
 - Python 3.8+, PyTorch 2.0+, Torchvision 0.15+
 - NumPy, Pandas, Pillow, tqdm, scikit-learn (metrics)
 
-See [requirements.txt](requirements.txt). Tested on a single NVIDIA 4090 (Linux).
+See [requirements.txt](requirements.txt). GPU build uses PyTorch with CUDA 12.8 (`cu128`); tested on NVIDIA 5090 / 4090 (Linux).
 
 ## Data Preparation
 
@@ -74,7 +74,7 @@ The loader maps each CSV `ID` to `<ID>.png` or `<ID>.tif` automatically. Images 
 FedCoP/
 ├── code/
 │   ├── exps/
-│   │   └── federated_main.py      # Main entry point (7 algorithms + dispatch)
+│   │   └── federated_main.py      # Main entry point (6 algorithms + dispatch)
 │   ├── lib/
 │   │   ├── options.py             # Argument parsing
 │   │   ├── utils.py               # Data loading, prototype aggregation, exp_details
@@ -92,8 +92,9 @@ FedCoP/
 │   │       ├── aggregation.py     # Bayesian precision-weighted fusion
 │   │       └── structured.py      # ★ Co-occurrence stat / fusion / L_co / mean-field decode
 │   └── scripts/
-│       ├── run.sh                 # Full benchmark (3 seeds, mean±std)
-│       └── run_test.sh            # Smoke test (5 rounds, single seed)
+│       ├── run.sh                 # Full benchmark (multi-seed, mean±std)
+│       ├── run_test.sh            # Smoke test (3 rounds, single seed)
+│       └── ablation.sh            # FedCoP ablation sweep
 ├── data/                          # Datasets (gitignored)
 ├── logs/                          # Run logs (gitignored)
 ├── protos_vis/                    # t-SNE prototype npy/pdf (gitignored)
@@ -104,19 +105,20 @@ FedCoP/
 
 ## Running
 
-Select the algorithm via `--alg` (default: `fedcop`). All algorithms use a pretrained ResNet-50 backbone.
+Select the algorithm via `--alg` (default: `fedcop`). All algorithms share an ImageNet-pretrained ResNet-50 backbone (use `--no-pretrained` to train from scratch).
 
 ### Quick smoke test
 ```bash
-bash code/scripts/run_test.sh           # all algorithms, 5 rounds, single seed
+bash code/scripts/run_test.sh           # all algorithms, 3 rounds, single seed
 bash code/scripts/run_test.sh fedcop    # only FedCoP
 ```
 
-### Full benchmark (3 seeds, mean±std summary)
+### Full benchmark (multi-seed, mean±std summary)
 ```bash
 bash code/scripts/run.sh                # all algorithms + ablations
-bash code/scripts/run.sh fedcop         # only FedCoP across 3 seeds
+bash code/scripts/run.sh fedcop         # only FedCoP (all seeds)
 ```
+The script ships with a single seed for tuning; add more entries to the `SEEDS` array for the final mean±std report. FedCoP ablations can also be swept via `bash code/scripts/ablation.sh`.
 
 ### Dataset selection (ChestX-ray14 default; MuReD for cross-modality)
 ```bash
@@ -137,7 +139,8 @@ python code/exps/federated_main.py --alg fedseproto --mi_lambda 0.05
 # FedCoP (proposed)
 python code/exps/federated_main.py --alg fedcop \
     --co_lambda 0.1 --cov_shrinkage 0.1 --co_beta 1.0 --co_mf_steps 2 \
-    --ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 --ld_warmup 20
+    --ent_lambda 1e-3 --proto_momentum 0.9 --temperature 1.0 \
+    --ld_warmup 10 --co_warmup 5 --fuse_alpha 0.5
 
 # FedCoP ablations
 python code/exps/federated_main.py --alg fedcop --no_cooccurrence    # R̂ = I
@@ -155,7 +158,9 @@ python code/exps/federated_main.py --alg fedcop --no_lco             # training-
 | `--num_users` | 20 | Number of clients |
 | `--frac` | 0.25 | Fraction of clients per round |
 | `--train_ep` | 1 | Local epochs per round |
-| `--local_bs` | 4 | Local batch size |
+| `--local_bs` | 32 | Local batch size |
+| `--num_workers` | 16 | DataLoader workers per client (data-loading throughput) |
+| `--pin_memory` | 1 | CUDA pinned memory for faster host→device copy |
 | `--lr` | 0.01 | Learning rate |
 | `--seed` | 1234 | Random seed |
 
@@ -166,7 +171,7 @@ python code/exps/federated_main.py --alg fedcop --no_lco             # training-
 | `--num_classes` | 14 | 14 (chestxray14) / 20 (mured) |
 | `--proto_dim` | None→256 | Prototype dimension |
 | `--image_size` | 224 | Input image size |
-| `--pretrained` | True | ImageNet pretrained ResNet-50 |
+| `--pretrained` | True | ImageNet pretrained ResNet-50 (on by default; `--no-pretrained` to disable) |
 | `--ways` | 3 | Avg classes per client (Non-IID) |
 | `--shots` | 100 | Avg samples per class per client |
 | `--stdev` | 2 | Std of ways/shots across clients |
@@ -186,10 +191,12 @@ python code/exps/federated_main.py --alg fedcop --no_lco             # training-
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--co_lambda` | 0.1 | Structure loss L_co weight |
+| `--co_warmup` | 10 | L_co warmup rounds (R̂ is noise early on) |
 | `--cov_shrinkage` | 0.1 | R̂ shrinkage η toward identity |
 | `--co_rank` | 0 | Low-rank approx rank (0 = full) |
 | `--co_beta` | 1.0 | Mean-field coupling strength β |
 | `--co_mf_steps` | 2 | Mean-field iterations |
+| `--fuse_alpha` | 0.5 | Inference fusion α: `α·logit_cls + (1−α)·logit_proto` |
 | `--no_cooccurrence` | False | Ablation: R̂=I, structure off |
 | `--local_cooc_only` | False | Ablation: per-client local R̂ (no federation) |
 | `--no_lco` | False | Ablation: training-side L_co off |

@@ -24,7 +24,7 @@ RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'
 CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; NC=$'\033[0m'
 
 # ── 共享参数(与 run.sh 一致)──
-# WAYS 不在此固定:按数据集取总类别数 50%(见下方 case 后)
+# WAYS 不在此固定:按数据集取总类别数 75%(见下方 case 后)
 ROUNDS=20; NUM_USERS=10; SHOTS=50; STDEV=2
 LD=1.0; FRAC=0.5; PROTO_DIM=128
 SEEDS=(1234)                                   # 调参阶段单 seed;定稿改 (1234 5678 9012)
@@ -35,11 +35,11 @@ case ${DATASET} in
     mured)       NUM_CLASSES=20 ;;
     *) echo "未知 DATASET=${DATASET}"; exit 1 ;;
 esac
-WAYS=$((NUM_CLASSES / 2))              # 每客户端类别数 = 总类别数 50%(chestxray→7, mured→10)
+WAYS=$((NUM_CLASSES * 3 / 4))          # 每客户端类别数 = 总类别数 75%(chestxray→10, mured→15)
 
 BASE_ARGS="--dataset ${DATASET} --num_classes ${NUM_CLASSES} --num_users ${NUM_USERS} \
 --ways ${WAYS} --shots ${SHOTS} --stdev ${STDEV} --rounds ${ROUNDS} --frac ${FRAC} \
---ld ${LD} --proto_dim ${PROTO_DIM} --local_bs 16 --train_ep 5"
+--ld ${LD} --proto_dim ${PROTO_DIM} --local_bs 32 --train_ep 5"
 
 # 完整方法(A0)的 FedCoP flag
 FC="--co_lambda 0.1 --cov_shrinkage 0.1 --co_beta 1.0 --co_mf_steps 2 \
